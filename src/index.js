@@ -6251,6 +6251,7 @@ var RADAR_TECHNOS = [
   ["Meta Pixel", /connect\.facebook\.net|fbq\s*\(/i],
   ["Google Tag Manager", /googletagmanager\.com\/gtm\.js/i],
   ["Google Analytics", /gtag\/js\?id=G-|google-analytics\.com/i],
+  ["Google Ads", /googleadservices\.com|gtag\/js\?id=AW-|['"]AW-\d{6,}/i],
   ["TikTok Pixel", /analytics\.tiktok\.com|ttq\.load/i],
   ["Gorgias", /gorgias\.(chat|com)/i]
 ];
@@ -6278,6 +6279,24 @@ function radarSignauxCro(html) {
 }
 __name(radarSignauxCro, "radarSignauxCro");
 __name2(radarSignauxCro, "radarSignauxCro");
+function radarNombreAvis(html) {
+  let max = 0;
+  const texte = String(html || "");
+  const motifs = [
+    /(\d{1,3}(?:[\s.,\u202f\u00a0]\d{3})*|\d+)\s*(?:avis|reviews?|\u00e9valuations|commentaires clients)/gi,
+    /data-number-of-reviews=["'](\d+)/gi,
+    /"reviewCount"\s*:\s*"?(\d+)/gi
+  ];
+  for (const re of motifs) {
+    for (const m of texte.matchAll(re)) {
+      const n = Number(String(m[1]).replace(/[^\d]/g, ""));
+      if (n > max && n < 1e6) max = n;
+    }
+  }
+  return max;
+}
+__name(radarNombreAvis, "radarNombreAvis");
+__name2(radarNombreAvis, "radarNombreAvis");
 function radarEvaluerMarche(html, domaine, pays) {
   if ((pays || "FR") !== "FR") return { statut: "oui", confiance: 100, preuves: [pays] };
   let points = 0;
@@ -6465,7 +6484,7 @@ async function radarReglages(db) {
     scoreComplement: n("score_minimum_complement", 45),
     shopifyObligatoire: o.shopify_obligatoire !== "0",
     pubsMin: n("pubs_actives_min", 2),
-    premierePubMax: n("premiere_pub_max_jours", 90),
+    pubAncienneteMin: n("pub_anciennete_min_jours", 7),
     p: {
       pub30: n("pts_pub_moins30", 15),
       pub60: n("pts_pub_30_60", 10),
@@ -6489,7 +6508,9 @@ async function radarReglages(db) {
       marcheFr: n("pts_marche_fr", 10),
       pertinenceNiche: n("pts_pertinence_niche", 10),
       maturite: n("pts_maturite_max", 10),
-      timing: n("pts_timing_max", 5)
+      timing: n("pts_timing_max", 5),
+      googleAds: n("pts_google_ads", 5),
+      traction: n("pts_traction_max", 8)
     }
   };
 }
@@ -6501,7 +6522,8 @@ function radarScorer(p, reg) {
   const jPub = radarJoursDepuis(p.premiere_pub_vue);
   const crea = Number(p.pubs_actives || 0);
   let pub = 0;
-  if (jPub !== null) pub += jPub < 30 ? P.pub30 : jPub <= 60 ? P.pub60 : jPub <= 90 ? P.pub90 : 0;
+  if (jPub !== null) pub += jPub >= 60 ? P.pub30 : jPub >= 30 ? P.pub60 : jPub >= 14 ? P.pub90 : 0;
+  if (p.google_ads) pub += P.googleAds;
   pub += crea >= 10 ? P.crea10 : crea >= 5 ? P.crea5 : crea >= 2 ? P.crea2 : 0;
   if (p.portee_ue > 0) pub += Math.min(P.portee, Math.round(Math.log10(p.portee_ue) - 2));
   d["Meta Ads"] = Math.max(0, pub);
@@ -6536,7 +6558,9 @@ function radarScorer(p, reg) {
   if (p.domaine_confiance >= 80) mat += 2;
   d["Maturit\xE9"] = Math.min(P.maturite, mat);
   const jDom = radarJoursDepuis(p.domaine_cree_le);
-  d["Timing"] = jDom !== null && jDom < 365 && (sourceWeb || jPub !== null && jPub < 45) ? P.timing : 0;
+  d["Timing"] = jDom !== null && jDom >= 365 ? P.timing : 0;
+  const avis = Number(p.nombre_avis || 0);
+  d["Traction"] = avis >= 200 ? P.traction : avis >= 50 ? Math.ceil(P.traction * 0.6) : avis >= 10 ? Math.ceil(P.traction * 0.3) : 0;
   const total = Object.values(d).reduce((a, b) => a + b, 0);
   return { score: Math.max(0, Math.min(100, Math.round(total))), detail: d };
 }
@@ -7038,13 +7062,15 @@ async function radarAnalyserAnnonceur(env, annonceur, reg) {
       domaine: annonceur.domaine,
       domaine_confiance: annonceur.confiance,
       technos_n: technos.filter((t) => t.detecte).length,
-      domaine_cree_le: rdap.creeLe
+      domaine_cree_le: rdap.creeLe,
+      google_ads: technos.some((t) => t.nom === "Google Ads" && t.detecte),
+      nombre_avis: radarNombreAvis(site.html)
     };
     const resultatScore = radarScorer(temporaire, reg);
     const joursPub = radarJoursDepuis(annonceur.premierePub);
     const joursDomaine = radarJoursDepuis(rdap.creeLe);
     const sourceWeb = radarEstSourceWeb(annonceur.source);
-    const activiteValide = sourceWeb || annonceur.pubsActives >= reg.pubsMin && (joursPub === null || joursPub <= reg.premierePubMax);
+    const activiteValide = sourceWeb || annonceur.pubsActives >= reg.pubsMin && (joursPub === null || joursPub >= reg.pubAncienneteMin);
     const marcheValide = !sourceWeb || marche.statut === "oui";
     const nicheValide = !sourceWeb || pertinence.confiance >= 60;
     const qualifie = resultatScore.score >= reg.scoreMin && activiteValide && marcheValide && nicheValide && (!reg.shopifyObligatoire || shopify2.statut === "oui");
@@ -7299,13 +7325,13 @@ async function radarCompleterJour(db, reg) {
       WHERE presente_le IS NULL AND statut='nouveau' AND etape='analyse' AND score>=?
         AND julianday('now')-julianday(cree_le)<=7
         AND (source IN ('google_gemini','web_brave','common_crawl') OR (COALESCE(source,'meta')='meta' AND pubs_actives>=?
-          AND (premiere_pub_vue IS NULL OR julianday('now')-julianday(premiere_pub_vue)<=?)))
+          AND (premiere_pub_vue IS NULL OR julianday('now')-julianday(premiere_pub_vue)>=?)))
         AND (?=0 OR shopify_statut='oui')
       ORDER BY score DESC, id DESC LIMIT ?)`).bind(
     jour,
     reg.scoreComplement,
     reg.pubsMin,
-    reg.premierePubMax,
+    reg.pubAncienneteMin,
     reg.shopifyObligatoire ? 1 : 0,
     manque
   ).run();
@@ -7542,7 +7568,7 @@ async function pageRadar(env, url, message) {
           <label>Prospects par jour<input name="prospects_par_jour" type="number" min="1" max="50" value="${reg.parJour}"></label>
           <label>Score minimum<input name="score_minimum" type="number" min="0" max="100" value="${reg.scoreMin}"></label>
           <label>Publicit\xE9s actives minimum<input name="pubs_actives_min" type="number" min="1" value="${reg.pubsMin}"></label>
-          <label>Premi\xE8re pub d\xE9tect\xE9e \u2014 max (jours)<input name="premiere_pub_max_jours" type="number" min="1" value="${reg.premierePubMax}"></label>
+          <label>Pubs actives depuis au moins (jours)<input name="pub_anciennete_min_jours" type="number" min="0" value="${reg.pubAncienneteMin}"></label>
           <label>Shopify obligatoire<select name="shopify_obligatoire">
             <option value="1"${reg.shopifyObligatoire ? " selected" : ""}>oui</option>
             <option value="0"${reg.shopifyObligatoire ? "" : " selected"}>non</option></select></label>
@@ -7555,9 +7581,11 @@ async function pageRadar(env, url, message) {
           augmente le potentiel d'intervention : c'est volontaire.</p>
         <form class="f" method="POST" action="?cle=${cle}&page=radar&action=radar_reglages">
           ${[
-      ["pts_pub_moins30", "Pub < 30 jours"],
-      ["pts_pub_30_60", "Pub 30\u201360 jours"],
-      ["pts_pub_60_90", "Pub 60\u201390 jours"],
+      ["pts_pub_moins30", "Pubs actives depuis 60 jours et +"],
+      ["pts_pub_30_60", "Pubs actives depuis 30\u201360 jours"],
+      ["pts_pub_60_90", "Pubs actives depuis 14\u201330 jours"],
+      ["pts_google_ads", "Balise Google Ads d\xE9tect\xE9e"],
+      ["pts_traction_max", "Traction : avis clients (max)"],
       ["pts_creatives_10plus", "10 cr\xE9atives ou +"],
       ["pts_creatives_5_9", "5 \xE0 9 cr\xE9atives"],
       ["pts_creatives_2_4", "2 \xE0 4 cr\xE9atives"],
@@ -7576,8 +7604,8 @@ async function pageRadar(env, url, message) {
       ["pts_marche_fr", "March\xE9 fran\xE7ais confirm\xE9"],
       ["pts_pertinence_niche", "Pertinence avec la niche"],
       ["pts_maturite_max", "Maturit\xE9 (max)"],
-      ["pts_timing_max", "Timing (max)"]
-    ].map(([k, lib]) => `<label>${echapper(lib)}<input name="${k}" type="number" min="0" max="50" value="${reg.brut[k] ?? (k === "pts_source_google" ? 20 : ["pts_marche_fr", "pts_pertinence_niche"].includes(k) ? 10 : 0)}"></label>`).join("")}
+      ["pts_timing_max", "Domaine de plus d'un an"]
+    ].map(([k, lib]) => `<label>${echapper(lib)}<input name="${k}" type="number" min="0" max="50" value="${reg.brut[k] ?? (k === "pts_source_google" ? 20 : ["pts_marche_fr", "pts_pertinence_niche"].includes(k) ? 10 : k === "pts_traction_max" ? 8 : k === "pts_google_ads" ? 5 : 0)}"></label>`).join("")}
           <button class="envoyer large" type="submit">Enregistrer les coefficients</button>
         </form>
       </section>`;
