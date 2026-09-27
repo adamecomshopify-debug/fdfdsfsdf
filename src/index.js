@@ -6462,6 +6462,7 @@ async function radarReglages(db) {
     pays: o.pays || "FR",
     parJour: n("prospects_par_jour", 10),
     scoreMin: n("score_minimum", 60),
+    scoreComplement: n("score_minimum_complement", 45),
     shopifyObligatoire: o.shopify_obligatoire !== "0",
     pubsMin: n("pubs_actives_min", 2),
     premierePubMax: n("premiere_pub_max_jours", 90),
@@ -7274,6 +7275,7 @@ async function executerRadar(env) {
     if (r.analyse) analyses += 1;
     if (r.qualifie) qualifies += 1;
   }
+  qualifies += await radarCompleterJour(db, reg);
   return {
     source,
     motCle: motCle.mot,
@@ -7287,6 +7289,30 @@ async function executerRadar(env) {
 }
 __name(executerRadar, "executerRadar");
 __name2(executerRadar, "executerRadar");
+async function radarCompleterJour(db, reg) {
+  const jour = (/* @__PURE__ */ new Date()).toISOString().slice(0, 10);
+  const deja = await db.prepare("SELECT COUNT(*) AS n FROM radar_prospects WHERE presente_le=?").bind(jour).first();
+  const manque = reg.parJour - Number(deja?.n || 0);
+  if (manque <= 0) return 0;
+  const r = await db.prepare(`UPDATE radar_prospects SET presente_le=? WHERE id IN (
+      SELECT id FROM radar_prospects
+      WHERE presente_le IS NULL AND statut='nouveau' AND etape='analyse' AND score>=?
+        AND julianday('now')-julianday(cree_le)<=7
+        AND (source IN ('google_gemini','web_brave','common_crawl') OR (COALESCE(source,'meta')='meta' AND pubs_actives>=?
+          AND (premiere_pub_vue IS NULL OR julianday('now')-julianday(premiere_pub_vue)<=?)))
+        AND (?=0 OR shopify_statut='oui')
+      ORDER BY score DESC, id DESC LIMIT ?)`).bind(
+    jour,
+    reg.scoreComplement,
+    reg.pubsMin,
+    reg.premierePubMax,
+    reg.shopifyObligatoire ? 1 : 0,
+    manque
+  ).run();
+  return Number(r?.meta?.changes || 0);
+}
+__name(radarCompleterJour, "radarCompleterJour");
+__name2(radarCompleterJour, "radarCompleterJour");
 function radarResumeCollecte(r) {
   if (!r) return "Collecte termin\xE9e.";
   const origine = radarLibelleSource(r.source);
@@ -7329,14 +7355,9 @@ async function pageRadar(env, url, message) {
       env.DB,
       `SELECT * FROM radar_prospects
        WHERE statut NOT IN ('contact\xE9','r\xE9pondu','rdv','client','non pertinent','d\xE9j\xE0 optimis\xE9')
-         AND etape='analyse' AND presente_le IS NOT NULL AND score>=?
-         AND (source IN ('google_gemini','web_brave','common_crawl') OR (COALESCE(source,'meta')='meta' AND pubs_actives>=?
-           AND (premiere_pub_vue IS NULL OR julianday('now')-julianday(premiere_pub_vue)<=?)))
+         AND etape='analyse' AND presente_le IS NOT NULL
          AND (?=0 OR shopify_statut='oui')
-       ORDER BY score DESC, id DESC LIMIT ?`,
-      reg.scoreMin,
-      reg.pubsMin,
-      reg.premierePubMax,
+       ORDER BY presente_le DESC, score DESC, id DESC LIMIT ?`,
       reg.shopifyObligatoire ? 1 : 0,
       reg.parJour
     ),
