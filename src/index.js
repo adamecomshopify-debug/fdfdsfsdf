@@ -6522,7 +6522,7 @@ function radarScorer(p, reg) {
   const jPub = radarJoursDepuis(p.premiere_pub_vue);
   const crea = Number(p.pubs_actives || 0);
   let pub = 0;
-  if (jPub !== null) pub += jPub >= 60 ? P.pub30 : jPub >= 30 ? P.pub60 : jPub >= 14 ? P.pub90 : 0;
+  if (jPub !== null) pub += jPub >= 7 ? P.pub30 : jPub >= 3 ? P.pub60 : jPub >= 1 ? P.pub90 : 0;
   if (p.google_ads) pub += P.googleAds;
   pub += crea >= 10 ? P.crea10 : crea >= 5 ? P.crea5 : crea >= 2 ? P.crea2 : 0;
   if (p.portee_ue > 0) pub += Math.min(P.portee, Math.round(Math.log10(p.portee_ue) - 2));
@@ -7581,9 +7581,9 @@ async function pageRadar(env, url, message) {
           augmente le potentiel d'intervention : c'est volontaire.</p>
         <form class="f" method="POST" action="?cle=${cle}&page=radar&action=radar_reglages">
           ${[
-      ["pts_pub_moins30", "Pubs actives depuis 60 jours et +"],
-      ["pts_pub_30_60", "Pubs actives depuis 30\u201360 jours"],
-      ["pts_pub_60_90", "Pubs actives depuis 14\u201330 jours"],
+      ["pts_pub_moins30", "Pubs actives depuis 7 jours et +"],
+      ["pts_pub_30_60", "Pubs actives depuis 3\u20137 jours"],
+      ["pts_pub_60_90", "Pubs actives depuis 1\u20133 jours"],
       ["pts_google_ads", "Balise Google Ads d\xE9tect\xE9e"],
       ["pts_traction_max", "Traction : avis clients (max)"],
       ["pts_creatives_10plus", "10 cr\xE9atives ou +"],
