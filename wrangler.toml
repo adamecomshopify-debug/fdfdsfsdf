@@ -1,0 +1,52 @@
+name = "adamecom-automations"
+main = "src/index.js"
+compatibility_date = "2026-08-01"
+workers_dev = true
+# Keep variables set in the Cloudflare dashboard (bank details, notification email) that are not listed here.
+keep_vars = true
+
+routes = [
+  { pattern = "app.adam-ecom.online", custom_domain = true }
+]
+
+[triggers]
+crons = ["* * * * *", "*/15 * * * *"]
+
+[observability]
+enabled = true
+head_sampling_rate = 1
+
+[[d1_databases]]
+binding = "DB"
+database_name = "adamecom"
+database_id = "300d5b2f-9be9-4cab-90ae-6cbd14c41d02"
+
+[vars]
+BREVO_LIST = "shopify-customers"
+DELAI_MINUTES = "5"
+FEED_URL = "https://adam-ecom.com/blogs/actualites?view=feed"
+FORMULAIRE_URL = "https://docs.google.com/forms/d/1GdSPcKzFRlLB1qPSe4zyzOQGDeQcBr2AIjhW2NZykMg"
+GEMINI_RADAR_MODEL = "gemini-3.7-flash"
+LIEN_MEET_DEFAUT = ""
+LIGNE_PRIX = "0.00"
+SENDER_EMAIL = "info@adam-ecom.com"
+SENDER_NAME = "AdamEcom"
+SHOPIFY_STORE = "i5mii0-22.myshopify.com"
+
+# Secrets (set with: npx wrangler secret put NAME):
+#   BREVO_API_KEY
+#   CALENDLY_TOKEN
+#   CLE_TEST
+#   GEMINI_API_KEY
+#   META_TOKEN
+#   SHOPIFY_CLIENT_ID
+#   SHOPIFY_CLIENT_SECRET
+# Dashboard-only variables (kept by keep_vars):
+#   BANQUE_ADRESSE
+#   BANQUE_BIC
+#   BANQUE_COMPTE
+#   BANQUE_GUICHET
+#   BANQUE_IBAN
+#   BANQUE_NOM
+#   BANQUE_TITULAIRE
+#   NOTIF_EMAIL
