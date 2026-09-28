@@ -1,3 +1,4 @@
+import { connect } from "cloudflare:sockets";
 var __defProp = Object.defineProperty;
 var __name = (target, value) => __defProp(target, "name", { value, configurable: true });
 
@@ -30,7 +31,141 @@ __name(amorcageFait, "amorcageFait");
 __name2(amorcageFait, "amorcageFait");
 __name22(amorcageFait, "amorcageFait");
 var marquerAmorcage = /* @__PURE__ */ __name22((db, domaine) => db.prepare("INSERT OR IGNORE INTO amorcage (domaine, fait_le) VALUES (?, ?)").bind(domaine, (/* @__PURE__ */ new Date()).toISOString()).run(), "marquerAmorcage");
+function smtpB64(texte) {
+  const octets = typeof texte === "string" ? new TextEncoder().encode(texte) : texte;
+  let bin = "";
+  for (let i = 0; i < octets.length; i += 32768) bin += String.fromCharCode(...octets.subarray(i, i + 32768));
+  return btoa(bin);
+}
+function smtpLignes76(b64) {
+  return b64.replace(/.{1,76}/g, "$&\r\n");
+}
+function smtpEntete(texte) {
+  return /^[\x20-\x7e]*$/.test(texte) ? texte : `=?UTF-8?B?${smtpB64(texte)}?=`;
+}
+function smtpAdresse(a) {
+  return a?.name ? `${smtpEntete(a.name)} <${a.email}>` : `<${a.email}>`;
+}
+async function envoyerSmtp(env, m) {
+  const hote = env.SMTP_HOST || "smtp.hostinger.com";
+  const port = Number(env.SMTP_PORT || 465);
+  const utilisateur = env.SMTP_USER || env.SENDER_EMAIL;
+  const de = m.sender?.email || env.SENDER_EMAIL;
+  const destinataires = [...m.to || [], ...m.cc || [], ...m.bcc || []].map((x) => x.email).filter(Boolean);
+  if (!destinataires.length) throw new Error("SMTP : aucun destinataire.");
+  const domaine = String(de).split("@")[1] || "localhost";
+  const frontiere = "adamecom-" + crypto.randomUUID();
+  const html = m.htmlContent || "";
+  const entetes = [
+    `From: ${smtpAdresse({ email: de, name: m.sender?.name })}`,
+    `To: ${(m.to || []).map(smtpAdresse).join(", ")}`,
+    ...m.cc?.length ? [`Cc: ${m.cc.map(smtpAdresse).join(", ")}`] : [],
+    ...m.replyTo?.email ? [`Reply-To: ${smtpAdresse(m.replyTo)}`] : [],
+    `Subject: ${smtpEntete(m.subject || "")}`,
+    `Date: ${(/* @__PURE__ */ new Date()).toUTCString().replace("GMT", "+0000")}`,
+    `Message-ID: <${crypto.randomUUID()}@${domaine}>`,
+    "MIME-Version: 1.0"
+  ];
+  const texteBrut = html.replace(/<br\s*\/?>/gi, "\n").replace(/<\/p>/gi, "\n\n").replace(/<[^>]+>/g, "").replace(/&nbsp;/g, " ").replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/\n{3,}/g, "\n\n").trim();
+  const alternative = [
+    `--${frontiere}-alt`,
+    "Content-Type: text/plain; charset=UTF-8",
+    "Content-Transfer-Encoding: base64",
+    "",
+    smtpLignes76(smtpB64(texteBrut)),
+    `--${frontiere}-alt`,
+    "Content-Type: text/html; charset=UTF-8",
+    "Content-Transfer-Encoding: base64",
+    "",
+    smtpLignes76(smtpB64(html)),
+    `--${frontiere}-alt--`,
+    ""
+  ].join("\r\n");
+  let corps;
+  if (m.attachment?.length) {
+    corps = [
+      ...entetes,
+      `Content-Type: multipart/mixed; boundary="${frontiere}"`,
+      "",
+      `--${frontiere}`,
+      `Content-Type: multipart/alternative; boundary="${frontiere}-alt"`,
+      "",
+      alternative,
+      ...m.attachment.flatMap((pj) => [
+        `--${frontiere}`,
+        `Content-Type: ${/\.ics$/i.test(pj.name) ? "text/calendar; method=REQUEST; charset=UTF-8" : "application/octet-stream"}; name="${pj.name}"`,
+        "Content-Transfer-Encoding: base64",
+        `Content-Disposition: attachment; filename="${pj.name}"`,
+        "",
+        smtpLignes76(pj.content)
+      ]),
+      `--${frontiere}--`,
+      ""
+    ].join("\r\n");
+  } else {
+    corps = [...entetes, `Content-Type: multipart/alternative; boundary="${frontiere}-alt"`, "", alternative].join("\r\n");
+  }
+  const socket = connect({ hostname: hote, port }, { secureTransport: port === 465 ? "on" : "starttls", allowHalfOpen: false });
+  let flux = socket;
+  let lecteur = flux.readable.getReader();
+  let ecrivain = flux.writable.getWriter();
+  const dec = new TextDecoder();
+  let tampon = "";
+  const lire = /* @__PURE__ */ __name2(async () => {
+    const lignes = [];
+    for (;;) {
+      const fin = tampon.indexOf("\r\n");
+      if (fin >= 0) {
+        const ligne = tampon.slice(0, fin);
+        tampon = tampon.slice(fin + 2);
+        lignes.push(ligne);
+        if (/^\d{3} /.test(ligne) || /^\d{3}$/.test(ligne)) return { code: Number(ligne.slice(0, 3)), texte: lignes.join(" | ") };
+        continue;
+      }
+      const { value, done } = await lecteur.read();
+      if (done) throw new Error("SMTP : connexion ferm\xE9e par le serveur (" + (lignes.join(" | ") || "sans r\xE9ponse") + ")");
+      tampon += dec.decode(value, { stream: true });
+    }
+  }, "lire");
+  const commande = /* @__PURE__ */ __name2(async (ligne, attendu, masque) => {
+    if (ligne !== null) await ecrivain.write(new TextEncoder().encode(ligne + "\r\n"));
+    const r = await lire();
+    if (!attendu.includes(r.code)) throw new Error(`SMTP ${hote} : ${masque || ligne || "connexion"} \u2192 ${r.texte}`.slice(0, 400));
+    return r;
+  }, "commande");
+  const delai = setTimeout(() => socket.close().catch(() => {}), 3e4);
+  try {
+    await commande(null, [220]);
+    await commande(`EHLO ${domaine}`, [250]);
+    if (port !== 465) {
+      await commande("STARTTLS", [220]);
+      lecteur.releaseLock();
+      ecrivain.releaseLock();
+      flux = socket.startTls();
+      lecteur = flux.readable.getReader();
+      ecrivain = flux.writable.getWriter();
+      await commande(`EHLO ${domaine}`, [250]);
+    }
+    await commande(`AUTH PLAIN ${smtpB64("\0" + utilisateur + "\0" + env.SMTP_PASSWORD)}`, [235], "AUTH (identifiant ou mot de passe)");
+    await commande(`MAIL FROM:<${de}>`, [250]);
+    for (const d of destinataires) await commande(`RCPT TO:<${d}>`, [250, 251]);
+    await commande("DATA", [354]);
+    await commande(corps.replace(/\r\n\./g, "\r\n..") + "\r\n.", [250], "DATA (message)");
+    try {
+      await commande("QUIT", [221]);
+    } catch {
+    }
+  } finally {
+    clearTimeout(delai);
+    try {
+      await socket.close();
+    } catch {
+    }
+  }
+  return { messageId: "smtp" };
+}
 async function brevo(env, chemin, options = {}) {
+  if (chemin === "/smtp/email" && env.SMTP_PASSWORD) return envoyerSmtp(env, JSON.parse(options.body || "{}"));
   const res = await fetch(`https://api.brevo.com/v3${chemin}`, {
     ...options,
     headers: {
@@ -7740,7 +7875,8 @@ async function pageRadar(env, url, message) {
           <label>Nom de boutique d'exemple<input name="boutique" value="Boutique Exemple"></label>
           <button class="envoyer" type="submit">Envoyer un test</button>
         </form>
-        <p class="sec" style="margin:0">Le test utilise le mod\xE8le enregistr\xE9 et ne touche \xE0 aucun prospect.</p>
+        <p class="sec" style="margin:0">Le test utilise le mod\xE8le enregistr\xE9 et ne touche \xE0 aucun prospect.
+          Envoi actuel : <b>${env.SMTP_PASSWORD ? `Hostinger (${echapper(env.SMTP_USER || env.SENDER_EMAIL || "")})` : "Brevo \u2014 ajoutez le secret SMTP_PASSWORD pour passer par Hostinger"}</b>.</p>
       </section>
 
       <section><h2>R\xE9glages du radar</h2>
