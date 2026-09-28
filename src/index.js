@@ -7822,6 +7822,124 @@ async function radarSuiviEmail(env, url) {
   }
   return new Response(RADAR_PIXEL, { headers: { "content-type": "image/gif", "cache-control": "no-store, max-age=0" } });
 }
+function radarIlYa(iso) {
+  if (!iso) return "";
+  const min = Math.max(0, Math.round((Date.now() - Date.parse(iso)) / 6e4));
+  if (min < 1) return "\xE0 l'instant";
+  if (min < 60) return `il y a ${min} min`;
+  const h = Math.round(min / 60);
+  if (h < 24) return `il y a ${h} h`;
+  const j = Math.round(h / 24);
+  return j === 1 ? "hier" : j < 30 ? `il y a ${j} jours` : dateFr2(iso, false);
+}
+var RADAR_CT_STATUTS = {
+  "contact\xE9": { lib: "En attente de r\xE9ponse", ton: "neutre" },
+  "r\xE9pondu": { lib: "A r\xE9pondu", ton: "bleu" },
+  rdv: { lib: "Rendez-vous", ton: "jaune" },
+  client: { lib: "Client", ton: "vert" }
+};
+function radarVueContactes(liste, cle) {
+  const n = liste.length;
+  const envoyes = liste.filter((p) => p.email_envoye_le);
+  const ouverts = envoyes.filter((p) => p.email_ouvertures > 0).length;
+  const cliques = envoyes.filter((p) => p.email_clics > 0).length;
+  const reponses = liste.filter((p) => p.statut !== "contact\xE9").length;
+  const pct = (a, b) => b ? Math.round(a / b * 100) + " %" : "\u2014";
+  const etape = (fait, lib, detail) => `<span class="ct-etape${fait ? " fait" : ""}"><i></i>${lib}${detail ? `<small>${detail}</small>` : ""}</span>`;
+  const ligne = (p) => {
+    const nom = p.marque || p.domaine || p.page_id || "Boutique";
+    const st = RADAR_CT_STATUTS[p.statut] || { lib: p.statut, ton: "neutre" };
+    const filtres = [p.email_ouvertures > 0 ? "ouvert" : "non-ouvert", p.email_clics > 0 ? "clique" : "", p.statut !== "contact\xE9" ? "reponse" : ""].join(" ");
+    const action = (statut, lib) => p.statut === statut ? "" : `<form method="POST" action="?cle=${cle}&page=radar&prospect=${p.id}&action=radar_statut&statut=${encodeURIComponent(statut)}&onglet=contactes"><button type="submit">${lib}</button></form>`;
+    return `<article class="ct-ligne" data-f="${filtres}" data-q="${echapper((nom + " " + (p.domaine || "") + " " + (p.email_contact || "")).toLowerCase())}">
+      <div class="ct-id">
+        <span class="ct-av">${echapper(nom.trim().charAt(0).toUpperCase() || "?")}</span>
+        <div class="ct-nom">
+          <a href="?cle=${cle}&page=radar&prospect=${p.id}"><b>${echapper(nom)}</b></a>
+          <span>${p.domaine ? `<a href="https://${echapper(p.domaine)}" target="_blank" rel="noopener">${echapper(p.domaine)}</a>` : ""}${p.email_contact ? ` \xB7 <a href="mailto:${echapper(p.email_contact)}">${echapper(p.email_contact)}</a>` : ""}</span>
+        </div>
+      </div>
+      <div class="ct-suivi">${p.email_envoye_le ? etape(true, "Envoy\xE9", radarIlYa(p.email_envoye_le)) + etape(p.email_ouvertures > 0, "Ouvert", p.email_ouvertures > 0 ? `${p.email_ouvertures}\xD7 \xB7 ${radarIlYa(p.email_ouvert_le)}` : "") + etape(p.email_clics > 0, "Cliqu\xE9", p.email_clics > 0 ? `${p.email_clics}\xD7` : "") : `<span class="ct-vide">Contact\xE9 ${radarIlYa(p.change_le) || ""} \xB7 sans suivi d'email</span>`}</div>
+      <div class="ct-statut"><span class="ct-pill ${st.ton}">${echapper(st.lib)}</span></div>
+      <div class="ct-actions">${action("r\xE9pondu", "A r\xE9pondu")}${action("rdv", "RDV")}${action("client", "Client")}</div>
+    </article>`;
+  };
+  return `<style>
+.ct-kpi{display:grid;grid-template-columns:repeat(4,1fr);gap:12px}
+.ct-kpi div{background:var(--surface);border:1px solid var(--trait);border-radius:var(--r);padding:16px 18px}
+.ct-kpi b{display:block;font-size:28px;font-weight:700;letter-spacing:-.04em;line-height:1.1}
+.ct-kpi span{font-size:12.5px;color:var(--gris)}
+.ct-kpi em{font-style:normal;font-size:13px;color:var(--doux);margin-left:6px;font-weight:500}
+.ct-barre{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin:22px 0 12px}
+.ct-filtres{display:flex;flex-wrap:wrap;gap:6px}
+.ct-filtres button{font:inherit;font-size:13px;padding:6px 13px;border-radius:999px;border:1px solid var(--trait-fort);background:var(--surface);color:var(--doux);cursor:pointer}
+.ct-filtres button.on{background:var(--encre);color:var(--fond);border-color:var(--encre)}
+.ct-chercher{margin-left:auto;font:inherit;font-size:13.5px;padding:7px 12px;border-radius:8px;border:1px solid var(--trait-fort);background:var(--surface);color:var(--encre);min-width:220px}
+.ct-liste{background:var(--surface);border:1px solid var(--trait);border-radius:var(--r);overflow:hidden}
+.ct-ligne{display:grid;grid-template-columns:minmax(0,1.3fr) minmax(0,1.5fr) 180px 220px;gap:18px;align-items:center;padding:16px 20px;border-bottom:1px solid var(--trait)}
+.ct-ligne:last-child{border-bottom:0}
+.ct-ligne[hidden],.ct-rien[hidden]{display:none}
+.ct-ligne:hover{background:var(--surface2)}
+.ct-id{display:flex;gap:12px;align-items:center;min-width:0}
+.ct-av{width:38px;height:38px;border-radius:10px;background:var(--surface3);color:var(--doux);display:flex;align-items:center;justify-content:center;font-weight:700;font-size:16px;flex-shrink:0}
+.ct-nom{min-width:0;display:flex;flex-direction:column;gap:2px}
+.ct-nom b{font-size:15px;font-weight:600;letter-spacing:-.01em}
+.ct-nom a{text-decoration:none}
+.ct-nom a:hover{text-decoration:underline;text-underline-offset:3px}
+.ct-nom span{font-size:12.5px;color:var(--gris);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.ct-suivi{display:flex;align-items:flex-start;gap:0}
+.ct-etape{flex:1;display:flex;flex-direction:column;gap:3px;font-size:12.5px;font-weight:500;color:var(--gris);position:relative;padding-top:16px}
+.ct-etape i{position:absolute;top:0;left:0;width:10px;height:10px;border-radius:50%;border:2px solid var(--trait-fort);background:var(--surface)}
+.ct-etape::before{content:"";position:absolute;top:5px;left:12px;right:4px;height:2px;background:var(--trait)}
+.ct-etape:last-child::before{display:none}
+.ct-etape.fait{color:var(--encre)}
+.ct-etape.fait i{background:var(--vert);border-color:var(--vert)}
+.ct-etape.fait::before{background:var(--vert);opacity:.35}
+.ct-etape small{font-size:11.5px;font-weight:400;color:var(--gris)}
+.ct-vide{font-size:12.5px;color:var(--gris)}
+.ct-pill{display:inline-block;font-size:12px;font-weight:600;padding:4px 10px;border-radius:999px;background:var(--surface3);color:var(--doux);white-space:nowrap}
+.ct-pill.bleu{background:#E6EEF8;color:#1F4E8C}
+.ct-pill.jaune{background:var(--jaune-p);color:var(--jaune-f)}
+.ct-pill.vert{background:var(--vertf);color:var(--vert)}
+@media(prefers-color-scheme:dark){.ct-pill.bleu{background:#16202E;color:#9DBBE6}}
+.ct-actions{display:flex;gap:6px;justify-content:flex-end}
+.ct-actions form{margin:0}
+.ct-actions button{font:inherit;font-size:12px;padding:5px 10px;border-radius:7px;border:1px solid var(--trait-fort);background:var(--surface);color:var(--doux);cursor:pointer;white-space:nowrap}
+.ct-actions button:hover{background:var(--surface2);color:var(--encre)}
+.ct-rien{padding:36px 20px;text-align:center;color:var(--gris);font-size:14px}
+@media(max-width:1100px){.ct-ligne{grid-template-columns:1fr 1fr}.ct-actions{justify-content:flex-start}}
+@media(max-width:700px){.ct-kpi{grid-template-columns:1fr 1fr}.ct-ligne{grid-template-columns:1fr}.ct-chercher{margin-left:0;width:100%}}
+</style>
+<section>
+  <h2>Boutiques contact\xE9es</h2>
+  <div class="ct-kpi">
+    <div><b>${n}</b><span>boutiques contact\xE9es</span></div>
+    <div><b>${ouverts}<em>${pct(ouverts, envoyes.length)}</em></b><span>emails ouverts</span></div>
+    <div><b>${cliques}<em>${pct(cliques, envoyes.length)}</em></b><span>ont cliqu\xE9</span></div>
+    <div><b>${reponses}<em>${pct(reponses, n)}</em></b><span>r\xE9ponses, RDV ou clients</span></div>
+  </div>
+  <div class="ct-barre">
+    <div class="ct-filtres" id="ct-filtres">
+      <button type="button" class="on" data-f="">Toutes (${n})</button>
+      <button type="button" data-f="ouvert">Ouvert</button>
+      <button type="button" data-f="non-ouvert">Pas encore ouvert</button>
+      <button type="button" data-f="clique">A cliqu\xE9</button>
+      <button type="button" data-f="reponse">R\xE9ponse / RDV / client</button>
+    </div>
+    <input class="ct-chercher" id="ct-chercher" type="search" placeholder="Rechercher une boutique…">
+  </div>
+  <div class="ct-liste" id="ct-liste">
+    ${n ? liste.map(ligne).join("") : ""}
+    <div class="ct-rien" id="ct-rien"${n ? ' hidden' : ""}>${n ? "Aucune boutique ne correspond." : "Aucune boutique contact\xE9e pour le moment."}</div>
+  </div>
+</section>
+<script>
+(function(){var f="",q="",bs=document.querySelectorAll("#ct-filtres button"),ls=document.querySelectorAll(".ct-ligne"),r=document.getElementById("ct-rien");
+function maj(){var k=0;ls.forEach(function(l){var ok=(!f||(" "+l.dataset.f+" ").indexOf(" "+f+" ")>-1)&&(!q||l.dataset.q.indexOf(q)>-1);l.hidden=!ok;if(ok)k++});if(r&&ls.length)r.hidden=k>0}
+bs.forEach(function(b){b.onclick=function(){bs.forEach(function(x){x.classList.remove("on")});b.classList.add("on");f=b.dataset.f;maj()}});
+document.getElementById("ct-chercher").oninput=function(e){q=e.target.value.trim().toLowerCase();maj()};})();
+</script>`;
+}
 function radarSuiviBadges(p) {
   if (!p.email_envoye_le) return "";
   return `<span>\u{1F4E8} envoy\xE9 le ${dateFr2(p.email_envoye_le, false)}</span>` + (p.email_ouvertures ? `<span class="prio encours">\u{1F440} ouvert ${p.email_ouvertures} fois (le ${dateFr2(p.email_ouvert_le, false)})</span>` : `<span class="sec">pas encore ouvert</span>`) + (p.email_clics ? `<span class="prio haute">\u{1F517} cliqu\xE9 ${p.email_clics} fois</span>` : "");
@@ -8176,6 +8294,7 @@ async function pageRadar(env, url, message) {
           ${liste.length ? `<div class="taches">${liste.map(carte).join("")}</div>` : `<div class="tw"><div class="vide">Aucun prospect marqu\xE9 \xE0 contacter.</div></div>`}
         </section>`;
     }
+    if (vue === "contactes") return `${message || ""}${onglets}${radarVueContactes(liste, cle)}`;
     const titre = vue === "ecartes" ? "Boutiques \xE9cart\xE9es" : "Boutiques contact\xE9es";
     return `${message || ""}${onglets}
       <section><h2>${titre}</h2>
