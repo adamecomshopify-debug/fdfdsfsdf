@@ -6665,6 +6665,7 @@ async function assurerRadarSchema(db) {
     ["telephone", "TEXT"],
     ["whatsapp", "INTEGER NOT NULL DEFAULT 0"],
     ["contacts_version", "INTEGER NOT NULL DEFAULT 0"],
+    ["contacts_prochain_essai", "TEXT"],
     ["suivi_jeton", "TEXT"],
     ["email_envoye_le", "TEXT"],
     ["email_ouvert_le", "TEXT"],
@@ -7309,6 +7310,9 @@ function radarExtraireContacts(html, domaine) {
 }
 __name(radarExtraireContacts, "radarExtraireContacts");
 __name2(radarExtraireContacts, "radarExtraireContacts");
+var RADAR_ERREUR_REESSAYER = /HTTP 429|HTTP 503|Too many subrequests|timed out|aborted|network/i;
+var RADAR_CONTACTS_ESSAIS_MAX = 6;
+var RADAR_CONTACTS_PAR_MINUTE = 2;
 var RADAR_PAGES_CONTACT = ["/policies/contact-information", "/policies/privacy-policy", "", "/pages/contact", "/pages/contactez-nous", "/policies/legal-notice", "/pages/mentions-legales", "/policies/terms-of-service"];
 async function radarTrouverContacts(domaine, htmlAccueil) {
   const racine = String(domaine || "").replace(/^www\./, "").split(".").slice(-2).join(".");
@@ -7328,6 +7332,7 @@ async function radarTrouverContacts(domaine, htmlAccueil) {
         html = (await radarChargerSite(domaine + chemin)).html;
       } catch (e) {
         derniereErreur = e;
+        if (RADAR_ERREUR_REESSAYER.test(String(e?.message))) throw e;
         continue;
       }
     }
@@ -7351,10 +7356,20 @@ async function radarEnregistrerContacts(db, prospectId, domaine, htmlAccueil) {
   try {
     contacts = await radarTrouverContacts(domaine, htmlAccueil);
   } catch (e) {
-    const essais = await db.prepare("UPDATE radar_prospects SET contacts_essais=contacts_essais+1, contacts_erreur=? WHERE id=? RETURNING contacts_essais").bind(String(e?.message || e).slice(0, 200), prospectId).first();
-    if (Number(essais?.contacts_essais || 0) < 3) return contacts;
+    const message = String(e?.message || e);
+    if (/Too many subrequests/i.test(message)) {
+      await db.prepare("UPDATE radar_prospects SET contacts_erreur=?, contacts_prochain_essai=? WHERE id=?").bind(message.slice(0, 200), new Date(Date.now() + 6e4).toISOString(), prospectId).run();
+      return contacts;
+    }
+    const essais = await db.prepare("UPDATE radar_prospects SET contacts_essais=contacts_essais+1, contacts_erreur=? WHERE id=? RETURNING contacts_essais").bind(message.slice(0, 200), prospectId).first();
+    const n = Number(essais?.contacts_essais || 0);
+    if (n < RADAR_CONTACTS_ESSAIS_MAX) {
+      const attente = [5, 15, 60, 180, 360][Math.min(n - 1, 4)] * 6e4;
+      await db.prepare("UPDATE radar_prospects SET contacts_prochain_essai=? WHERE id=?").bind(new Date(Date.now() + attente).toISOString(), prospectId).run();
+      return contacts;
+    }
   }
-  await db.prepare("UPDATE radar_prospects SET email_contact=COALESCE(?,email_contact), instagram=COALESCE(?,instagram), telephone=COALESCE(?,telephone), whatsapp=?, contacts_version=2, contacts_verifies_le=? WHERE id=?").bind(contacts.email, contacts.instagram, contacts.telephone, contacts.whatsapp ? 1 : 0, (/* @__PURE__ */ new Date()).toISOString(), prospectId).run();
+  await db.prepare("UPDATE radar_prospects SET email_contact=COALESCE(?,email_contact), instagram=COALESCE(?,instagram), telephone=COALESCE(?,telephone), whatsapp=?, contacts_version=2, contacts_verifies_le=?, contacts_prochain_essai=NULL WHERE id=?").bind(contacts.email, contacts.instagram, contacts.telephone, contacts.whatsapp ? 1 : 0, (/* @__PURE__ */ new Date()).toISOString(), prospectId).run();
   return contacts;
 }
 __name(radarEnregistrerContacts, "radarEnregistrerContacts");
@@ -7651,10 +7666,6 @@ async function radarCompleterJour(db, reg) {
   const jour = (/* @__PURE__ */ new Date()).toISOString().slice(0, 10);
   const deja = await db.prepare("SELECT COUNT(*) AS n FROM radar_prospects WHERE presente_le=? AND statut NOT IN ('non pertinent','d\xE9j\xE0 optimis\xE9')").bind(jour).first();
   const manque = reg.parJour - Number(deja?.n || 0);
-  const aCompleter = await tous2(db, `SELECT id, domaine FROM radar_prospects
-    WHERE presente_le IS NOT NULL AND (contacts_verifies_le IS NULL OR contacts_version < 2) AND domaine IS NOT NULL AND statut IN ('nouveau','\xE0 v\xE9rifier','\xE0 contacter')
-    ORDER BY presente_le DESC, score DESC LIMIT 5`);
-  for (const p of aCompleter) await radarEnregistrerContacts(db, p.id, p.domaine);
   if (manque <= 0) return 0;
   const r = await db.prepare(`UPDATE radar_prospects SET presente_le=? WHERE id IN (
       SELECT id FROM radar_prospects
@@ -7745,6 +7756,19 @@ async function radarEnvoyerProspect(env, p, a, objet, texte, origine) {
   await env.DB.prepare("UPDATE radar_prospects SET statut='contact\xE9', email_contact=COALESCE(email_contact, ?), suivi_jeton=?, email_envoye_le=?, email_ouvert_le=NULL, email_ouvertures=0, email_clique_le=NULL, email_clics=0, email_programme_le=NULL, email_erreur=NULL WHERE id=?").bind(a, jeton, maintenant, p.id).run();
   await env.DB.prepare(`INSERT INTO radar_historique
     (prospect_id, ancien_statut, nouveau_statut, motif, quand) VALUES (?, ?, ?, ?, ?)`).bind(p.id, p.statut || null, "contact\xE9", "email envoy\xE9 \xE0 " + a, maintenant).run();
+}
+async function radarContactsEnAttente(env) {
+  try {
+    const maintenant = (/* @__PURE__ */ new Date()).toISOString();
+    const file = await env.DB.prepare(`SELECT id, domaine FROM radar_prospects
+      WHERE presente_le IS NOT NULL AND (contacts_verifies_le IS NULL OR contacts_version < 2) AND domaine IS NOT NULL
+        AND statut IN ('nouveau','\xE0 v\xE9rifier','\xE0 contacter')
+        AND (contacts_prochain_essai IS NULL OR contacts_prochain_essai <= ?)
+      ORDER BY presente_le DESC, score DESC LIMIT ?`).bind(maintenant, RADAR_CONTACTS_PAR_MINUTE).all().catch(() => null);
+    for (const p of file?.results || []) await radarEnregistrerContacts(env.DB, p.id, p.domaine);
+  } catch (e) {
+    console.error("recherche contacts", e?.message || e);
+  }
 }
 var RADAR_ENVOIS_PAR_MINUTE = 5;
 async function radarEnvoisProgrammes(env) {
@@ -9583,7 +9607,7 @@ var index_default = {
         lancer("radar", executerRadar, env)
       ]));
     } else {
-      ctx.waitUntil(Promise.all([lancer("calendly", executer, env), smtpTestEnAttente(env), radarEnvoisProgrammes(env)]));
+      ctx.waitUntil(Promise.all([lancer("calendly", executer, env), smtpTestEnAttente(env), radarEnvoisProgrammes(env), radarContactsEnAttente(env)]));
     }
   },
   // Déclenchement manuel, pratique pour tester sans attendre la planification.
