@@ -7687,6 +7687,7 @@ __name2(radarResumeCollecte, "radarResumeCollecte");
 var RADAR_STATUTS = ["nouveau", "\xE0 v\xE9rifier", "\xE0 contacter", "contact\xE9", "r\xE9pondu", "rdv", "client", "non pertinent", "d\xE9j\xE0 optimis\xE9"];
 var RADAR_SORTIS = ["contact\xE9", "r\xE9pondu", "rdv", "client", "non pertinent", "d\xE9j\xE0 optimis\xE9"];
 var RADAR_MOTIFS = [
+  "d\xE9j\xE0 contact\xE9",
   "trop petite",
   "mauvaise niche",
   "hors Shopify",
