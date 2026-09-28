@@ -7265,6 +7265,13 @@ function radarNormaliserTelephone(brut) {
 }
 __name(radarNormaliserTelephone, "radarNormaliserTelephone");
 __name2(radarNormaliserTelephone, "radarNormaliserTelephone");
+function radarNettoyerEmail(e) {
+  let x = String(e || "").trim().toLowerCase();
+  while (x.startsWith("mailto:")) x = x.slice(7);
+  const m = x.match(/^(?:adresse|courriel)[:._-]?(.+@.+)$/) || x.match(/^e-?mail[:_-](.+@.+)$/);
+  if (m && m[1].split("@")[0].length >= 2) x = m[1];
+  return x;
+}
 function radarExtraireContacts(html, domaine) {
   const texte = String(html || "").replace(/&#64;|&commat;|\[at\]|\(at\)/gi, "@").replace(/&#43;/g, "+");
   const emails = /* @__PURE__ */ new Set();
@@ -7276,7 +7283,7 @@ function radarExtraireContacts(html, domaine) {
   }
   for (const m of texte.matchAll(/[a-z0-9._%+-]+@[a-z0-9-]+(?:\.[a-z0-9-]+)*\.[a-z]{2,}/gi)) emails.add(m[0].toLowerCase());
   const racine = String(domaine || "").replace(/^www\./, "").split("/")[0].split(".").slice(-2).join(".");
-  const valides = [...emails].filter((e) => /^[^@\s]+@[^@\s]+\.[a-z]{2,}$/i.test(e) && !RADAR_EMAILS_IGNORES.test(e));
+  const valides = [...new Set([...emails].map(radarNettoyerEmail))].filter((e) => /^[a-z0-9._%+-]+@[a-z0-9-]+(?:\.[a-z0-9-]+)*\.[a-z]{2,}$/i.test(e) && !RADAR_EMAILS_IGNORES.test(e));
   valides.sort((x, y) => radarRangEmail(x, racine) - radarRangEmail(y, racine));
   let instagram = null;
   for (const m of texte.matchAll(/instagram\.com\/([A-Za-z0-9_.]{2,30})/gi)) {
