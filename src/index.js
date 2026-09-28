@@ -7499,18 +7499,33 @@ function radarPriorite(s) {
 }
 __name(radarPriorite, "radarPriorite");
 __name2(radarPriorite, "radarPriorite");
-function radarModeleEmail(p, env) {
-  const nom = p.marque || p.domaine || "votre boutique";
-  return `Bonjour l'\xE9quipe ${nom},
+var RADAR_EMAIL_OBJET_DEFAUT = "Vous payez des clics qui n'ach\xE8tent pas ?";
+var RADAR_EMAIL_CORPS_DEFAUT = `Bonjour,
 
-J'ai d\xE9couvert ${p.domaine || "votre boutique"} via vos publicit\xE9s et j'ai pris quelques minutes pour analyser votre site.
+J'ai d\xE9couvert {Nom de la boutique} via l'une de vos publicit\xE9s.
 
-Vous investissez d\xE9j\xE0 pour attirer des visiteurs : j'ai rep\xE9r\xE9 plusieurs points concrets qui pourraient vous aider \xE0 en convertir davantage en clients (page produit, r\xE9assurance, parcours panier).
+Vous investissez d\xE9j\xE0 pour attirer du trafic.
 
-Seriez-vous ouverts \xE0 un court \xE9change de 15 minutes pour que je vous les pr\xE9sente ?
+Sur beaucoup de boutiques qui font de la pub, je retrouve les m\xEAmes frictions entre le clic et l'achat, surtout sur la page produit et la r\xE9assurance.
+
+C'est pr\xE9cis\xE9ment le type de probl\xE9matique sur lequel je travaille avec des boutiques Shopify.
+
+Est-ce que l'am\xE9lioration de votre taux de conversion est un sujet sur lequel vous travaillez actuellement ?
 
 Bonne journ\xE9e,
-${env.SENDER_NAME || "AdamEcom"}`;
+
+Adam
+Fondateur \u2014 AdamEcom
+Consultant Shopify \xB7 Conversion & CRO
+adam-ecom.com
+info@adam-ecom.com`;
+function radarModeleEmail(p, reg) {
+  const nom = p.marque || p.domaine || "votre boutique";
+  const remplir = /* @__PURE__ */ __name2((t) => String(t).replace(/\{\s*nom de la boutique\s*\}/gi, nom), "remplir");
+  return {
+    objet: remplir(reg?.brut?.email_objet || RADAR_EMAIL_OBJET_DEFAUT),
+    corps: remplir((reg?.brut?.email_corps || RADAR_EMAIL_CORPS_DEFAUT).replace(/\r\n/g, "\n"))
+  };
 }
 __name(radarModeleEmail, "radarModeleEmail");
 __name2(radarModeleEmail, "radarModeleEmail");
@@ -7708,6 +7723,15 @@ async function pageRadar(env, url, message) {
     )}</div>`).join("")}
       </section>
 
+      <section id="modele-email"><h2>Mod\xE8le d'email de prospection</h2>
+        <p class="sec" style="margin:-4px 0 0">Pr\xE9-rempli sur chaque prospect. <b>{Nom de la boutique}</b> est remplac\xE9 automatiquement par le nom de la boutique. Vous pouvez encore ajuster chaque email avant l'envoi.</p>
+        <form class="f" method="POST" action="?cle=${cle}&page=radar&action=radar_reglages">
+          <label class="large">Objet<input name="email_objet" required value="${echapper(reg.brut.email_objet || RADAR_EMAIL_OBJET_DEFAUT)}"></label>
+          <label class="large">Message<textarea name="email_corps" rows="18" required>${echapper(reg.brut.email_corps || RADAR_EMAIL_CORPS_DEFAUT)}</textarea></label>
+          <button class="envoyer large" type="submit">Enregistrer le mod\xE8le</button>
+        </form>
+      </section>
+
       <section><h2>R\xE9glages du radar</h2>
         <form class="f" method="POST" action="?cle=${cle}&page=radar&action=radar_reglages">
           <label>Pays<input name="pays" value="${echapper(reg.pays)}"></label>
@@ -7782,8 +7806,9 @@ async function pageRadar(env, url, message) {
           <form class="f" method="POST" style="border:0;padding:8px 0 0;background:none"
             action="?cle=${cle}&page=radar&prospect=${p.id}&action=radar_email">
             <label class="large">Destinataire<input name="a" type="email" required value="${echapper(p.email_contact || "")}" placeholder="contact@boutique.com"></label>
-            <label class="large">Objet<input name="objet" required value="${echapper(`${p.marque || p.domaine || "Votre boutique"} : quelques pistes pour convertir plus`)}"></label>
-            <label class="large">Message<textarea name="message" rows="8" required>${echapper(radarModeleEmail(p, env))}</textarea></label>
+            <label class="large">Objet<input name="objet" required value="${echapper(radarModeleEmail(p, reg).objet)}"></label>
+            <label class="large">Message<textarea name="message" rows="14" required>${echapper(radarModeleEmail(p, reg).corps)}</textarea></label>
+            <a class="sec" href="?cle=${cle}&page=radar&vue=reglages#modele-email">Modifier le mod\xE8le d'email</a>
             <button class="envoyer large" type="submit">Envoyer l'email</button>
           </form>
         </details>
@@ -7829,6 +7854,7 @@ async function pageRadar(env, url, message) {
 
     <section><div class="actions">
       <a class="bouton pale" href="?cle=${cle}&page=radar&vue=reglages">\u2699 Mots-cl\xE9s et r\xE9glages</a>
+      <a class="bouton pale" href="?cle=${cle}&page=radar&vue=reglages#modele-email">\u270F\uFE0F Mod\xE8le d'email</a>
       ${sourceDisponible ? `<form method="POST" action="?cle=${cle}&page=radar&action=radar_collecter" style="display:inline">
         <button class="envoyer" type="submit">Lancer une collecte maintenant</button></form>` : ""}
       <span class="sec">${motscles.filter((m) => m.actif).length} mots-cl\xE9s actifs \xB7 pays ${echapper(reg.pays)}</span>
