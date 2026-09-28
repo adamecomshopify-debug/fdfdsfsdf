@@ -182,8 +182,44 @@ async function envoyerSmtpPort(env, m, port) {
   }
   return { messageId: "smtp" };
 }
+async function envoyerResend(env, m) {
+  const adresse = (a) => a?.name ? `${a.name.replace(/[<>"]/g, "")} <${a.email}>` : a.email;
+  const emails = (liste) => (liste || []).map((x) => x.email).filter(Boolean);
+  const corps = {
+    from: adresse(m.sender?.email ? m.sender : { name: "AdamEcom", email: env.SENDER_EMAIL }),
+    to: emails(m.to),
+    subject: m.subject || "",
+    ...m.htmlContent ? { html: m.htmlContent } : {},
+    ...m.textContent ? { text: m.textContent } : {},
+    ...m.cc?.length ? { cc: emails(m.cc) } : {},
+    ...m.bcc?.length ? { bcc: emails(m.bcc) } : {},
+    ...m.replyTo?.email ? { reply_to: adresse(m.replyTo) } : {},
+    ...m.attachment?.length ? { attachments: m.attachment.map((pj) => ({ filename: pj.name, content: pj.content })) } : {}
+  };
+  const res = await fetch("https://api.resend.com/emails", {
+    method: "POST",
+    headers: { authorization: `Bearer ${env.RESEND_API_KEY}`, "content-type": "application/json" },
+    body: JSON.stringify(corps)
+  });
+  const texte = await res.text();
+  if (!res.ok) {
+    const e = new Error(`Resend \u2192 ${res.status} ${texte}`);
+    e.statut = res.status;
+    throw e;
+  }
+  const r = texte ? JSON.parse(texte) : {};
+  return { messageId: r.id || "resend" };
+}
 async function brevo(env, chemin, options = {}) {
-  if (chemin === "/smtp/email" && env.SMTP_PASSWORD) {
+  if (chemin === "/smtp/email" && env.RESEND_API_KEY) {
+    try {
+      return await envoyerResend(env, JSON.parse(options.body || "{}"));
+    } catch (e) {
+      if (!(e?.statut === 403 || e?.statut >= 500 || !e?.statut) || !env.BREVO_API_KEY) throw e;
+      console.error("Resend indisponible, envoi via Brevo :", e.message);
+    }
+  }
+  if (chemin === "/smtp/email" && env.SMTP_PASSWORD && !env.RESEND_API_KEY) {
     try {
       return await envoyerSmtp(env, JSON.parse(options.body || "{}"));
     } catch (e) {
@@ -7922,7 +7958,7 @@ async function pageRadar(env, url, message) {
           <button class="envoyer" type="submit">Envoyer un test</button>
         </form>
         <p class="sec" style="margin:0">Le test utilise le mod\xE8le enregistr\xE9 et ne touche \xE0 aucun prospect.
-          Envoi actuel : <b>${env.SMTP_PASSWORD ? `Hostinger (${echapper(env.SMTP_USER || env.SENDER_EMAIL || "")})` : "Brevo \u2014 ajoutez le secret SMTP_PASSWORD pour passer par Hostinger"}</b>.</p>
+          Envoi actuel : <b>${env.RESEND_API_KEY ? `Resend (${echapper(env.SENDER_EMAIL || "")})` : env.SMTP_PASSWORD ? `Hostinger (${echapper(env.SMTP_USER || env.SENDER_EMAIL || "")})` : "Brevo \u2014 ajoutez le secret SMTP_PASSWORD pour passer par Hostinger"}</b>.</p>
       </section>
 
       <section><h2>R\xE9glages du radar</h2>
