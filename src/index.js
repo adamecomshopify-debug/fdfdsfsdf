@@ -47,8 +47,20 @@ function smtpAdresse(a) {
   return a?.name ? `${smtpEntete(a.name)} <${a.email}>` : `<${a.email}>`;
 }
 async function envoyerSmtp(env, m) {
+  const ports = env.SMTP_PORT ? [Number(env.SMTP_PORT)] : [465, 587];
+  const erreurs = [];
+  for (const port of ports) {
+    try {
+      return await envoyerSmtpPort(env, m, port);
+    } catch (e) {
+      erreurs.push(`port ${port} : ${String(e?.message || e)}`);
+      if (/AUTH|RCPT|MAIL FROM|DATA \(message\)/.test(String(e?.message))) break;
+    }
+  }
+  throw new Error("SMTP " + erreurs.join(" \u2014 "));
+}
+async function envoyerSmtpPort(env, m, port) {
   const hote = env.SMTP_HOST || "smtp.hostinger.com";
-  const port = Number(env.SMTP_PORT || 465);
   const utilisateur = env.SMTP_USER || env.SENDER_EMAIL;
   const de = m.sender?.email || env.SENDER_EMAIL;
   const destinataires = [...m.to || [], ...m.cc || [], ...m.bcc || []].map((x) => x.email).filter(Boolean);
@@ -127,7 +139,9 @@ async function envoyerSmtp(env, m) {
       tampon += dec.decode(value, { stream: true });
     }
   }, "lire");
+  let etape = "connexion";
   const commande = /* @__PURE__ */ __name2(async (ligne, attendu, masque) => {
+    etape = masque || (ligne === null ? "accueil du serveur" : ligne.split(" ")[0]);
     if (ligne !== null) await ecrivain.write(new TextEncoder().encode(ligne + "\r\n"));
     const r = await lire();
     if (!attendu.includes(r.code)) throw new Error(`SMTP ${hote} : ${masque || ligne || "connexion"} \u2192 ${r.texte}`.slice(0, 400));
@@ -135,6 +149,7 @@ async function envoyerSmtp(env, m) {
   }, "commande");
   const delai = setTimeout(() => socket.close().catch(() => {}), 3e4);
   try {
+    await socket.opened;
     await commande(null, [220]);
     await commande(`EHLO ${domaine}`, [250]);
     if (port !== 465) {
@@ -155,6 +170,9 @@ async function envoyerSmtp(env, m) {
       await commande("QUIT", [221]);
     } catch {
     }
+  } catch (e) {
+    const msg = String(e?.message || e);
+    throw new Error(/^SMTP /.test(msg) ? msg : `${hote}:${port} \xE9tape ${etape} : ${msg}`);
   } finally {
     clearTimeout(delai);
     try {
@@ -7654,6 +7672,27 @@ Fondateur \u2014 AdamEcom
 Consultant Shopify \xB7 Conversion & CRO
 adam-ecom.com
 info@adam-ecom.com`;
+async function smtpTestEnAttente(env) {
+  try {
+    const demande = await env.DB.prepare("SELECT valeur FROM radar_reglages WHERE cle='smtp_test'").first();
+    if (!demande?.valeur) return;
+    await env.DB.prepare("DELETE FROM radar_reglages WHERE cle='smtp_test'").run();
+    const reg = await radarReglages(env.DB);
+    const modele = radarModeleEmail({ marque: "Boutique Exemple" }, reg);
+    let statut = "envoy\xE9", message = null;
+    try {
+      await envoyerEmail(env, { de: env.SENDER_EMAIL, deNom: env.SENDER_NAME || "AdamEcom", a: demande.valeur, objet: "[TEST] " + modele.objet, html: radarHtmlEmail(modele.corps), repondreA: { email: env.SENDER_EMAIL, name: env.SENDER_NAME || "AdamEcom" } });
+    } catch (e) {
+      statut = "\xE9chec";
+      message = String(e?.message || e);
+    }
+    await noterEnvoi(env, "radar_test", demande.valeur, modele.objet, statut, message);
+  } catch (e) {
+    console.error("smtp test", e?.message || e);
+  }
+}
+__name(smtpTestEnAttente, "smtpTestEnAttente");
+__name2(smtpTestEnAttente, "smtpTestEnAttente");
 function radarHtmlEmail(texte) {
   return `<div style="font-family:Arial,sans-serif;font-size:14px;line-height:1.5">${echapper(texte).replace(/\n/g, "<br>")}</div>`;
 }
@@ -9217,7 +9256,7 @@ var index_default = {
         lancer("radar", executerRadar, env)
       ]));
     } else {
-      ctx.waitUntil(lancer("calendly", executer, env));
+      ctx.waitUntil(Promise.all([lancer("calendly", executer, env), smtpTestEnAttente(env)]));
     }
   },
   // Déclenchement manuel, pratique pour tester sans attendre la planification.
