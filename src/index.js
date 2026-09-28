@@ -6465,7 +6465,10 @@ async function assurerRadarSchema(db) {
     ["instagram", "TEXT"],
     ["contacts_verifies_le", "TEXT"],
     ["contacts_essais", "INTEGER NOT NULL DEFAULT 0"],
-    ["contacts_erreur", "TEXT"]
+    ["contacts_erreur", "TEXT"],
+    ["telephone", "TEXT"],
+    ["whatsapp", "INTEGER NOT NULL DEFAULT 0"],
+    ["contacts_version", "INTEGER NOT NULL DEFAULT 0"]
   ];
   for (const [nom, type] of ajouts) {
     if (!colonnes.has(nom)) await db.prepare(`ALTER TABLE radar_prospects ADD COLUMN ${nom} ${type}`).run();
@@ -7036,14 +7039,39 @@ __name(radarChargerSite, "radarChargerSite");
 __name2(radarChargerSite, "radarChargerSite");
 var RADAR_EMAILS_IGNORES = /(\.(png|jpe?g|gif|webp|svg|css|js)$|example\.|sentry|wixpress|shopify\.com$|domain\.com$|email\.com$|votre|your|test@|noreply|no-reply|@2x)/i;
 var RADAR_INSTA_IGNORES = /^(p|reel|reels|explore|stories|accounts|tv|about|developer|legal|shopify|instagram)$/i;
+var RADAR_EMAILS_PERSO = /@(gmail|googlemail|hotmail|outlook|live|msn|yahoo|ymail|icloud|me|mac|aol|orange|wanadoo|free|sfr|neuf|laposte|bbox|proton|protonmail|gmx)\./i;
+function radarRangEmail(e, racine) {
+  if (RADAR_EMAILS_PERSO.test(e)) return 0;
+  const hote = e.split("@")[1] || "";
+  return hote === racine || hote.endsWith("." + racine) ? 1 : 2;
+}
+__name(radarRangEmail, "radarRangEmail");
+__name2(radarRangEmail, "radarRangEmail");
+function radarNormaliserTelephone(brut) {
+  let d = String(brut || "").replace(/[^\d+]/g, "");
+  if (d.startsWith("00")) d = "+" + d.slice(2);
+  if (/^0[1-9]\d{8}$/.test(d)) d = "+33" + d.slice(1);
+  if (/^33[1-9]\d{8}$/.test(d)) d = "+" + d;
+  if (!d.startsWith("+")) d = "+" + d;
+  const chiffres = d.replace(/\D/g, "");
+  if (chiffres.length < 9 || chiffres.length > 15 || /^(\d)\1+$/.test(chiffres)) return null;
+  return d;
+}
+__name(radarNormaliserTelephone, "radarNormaliserTelephone");
+__name2(radarNormaliserTelephone, "radarNormaliserTelephone");
 function radarExtraireContacts(html, domaine) {
-  const texte = String(html || "").replace(/&#64;|&commat;|\[at\]|\(at\)/gi, "@");
+  const texte = String(html || "").replace(/&#64;|&commat;|\[at\]|\(at\)/gi, "@").replace(/&#43;/g, "+");
   const emails = /* @__PURE__ */ new Set();
-  for (const m of texte.matchAll(/mailto:([^"'?>\s]+)/gi)) emails.add(decodeURIComponent(m[1]).toLowerCase());
+  for (const m of texte.matchAll(/mailto:([^"'?>\s]+)/gi)) {
+    try {
+      emails.add(decodeURIComponent(m[1]).toLowerCase());
+    } catch {
+    }
+  }
   for (const m of texte.matchAll(/[a-z0-9._%+-]+@[a-z0-9-]+(?:\.[a-z0-9-]+)*\.[a-z]{2,}/gi)) emails.add(m[0].toLowerCase());
+  const racine = String(domaine || "").replace(/^www\./, "").split("/")[0].split(".").slice(-2).join(".");
   const valides = [...emails].filter((e) => /^[^@\s]+@[^@\s]+\.[a-z]{2,}$/i.test(e) && !RADAR_EMAILS_IGNORES.test(e));
-  const racine = String(domaine || "").replace(/^www\./, "").split(".").slice(-2).join(".");
-  valides.sort((a, b) => Number(b.endsWith("@" + racine) || b.split("@")[1]?.endsWith("." + racine)) - Number(a.endsWith("@" + racine) || a.split("@")[1]?.endsWith("." + racine)));
+  valides.sort((x, y) => radarRangEmail(x, racine) - radarRangEmail(y, racine));
   let instagram = null;
   for (const m of texte.matchAll(/instagram\.com\/([A-Za-z0-9_.]{2,30})/gi)) {
     const pseudo = m[1].replace(/\.+$/, "");
@@ -7052,35 +7080,76 @@ function radarExtraireContacts(html, domaine) {
       break;
     }
   }
-  return { email: valides[0] || null, instagram };
+  let telephone = null;
+  let whatsapp = false;
+  for (const m of texte.matchAll(/(?:wa\.me\/|whatsapp\.com\/send\/?\?phone=|whatsapp:\/\/send\?phone=)\+?(\d{8,15})/gi)) {
+    telephone = radarNormaliserTelephone("+" + m[1]);
+    if (telephone) {
+      whatsapp = true;
+      break;
+    }
+  }
+  if (!telephone) {
+    for (const m of texte.matchAll(/href=["']tel:([^"']+)/gi)) {
+      telephone = radarNormaliserTelephone(decodeURIComponent(m[1]));
+      if (telephone) break;
+    }
+  }
+  if (!telephone) {
+    const visible = texte.replace(/<script[\s\S]*?<\/script>/gi, " ").replace(/<style[\s\S]*?<\/style>/gi, " ").replace(/<[^>]+>/g, " ");
+    const m = visible.match(/(?:\+33\s?|0033\s?|\b0)[67](?:[\s.-]?\d{2}){4}\b/) || visible.match(/(?:\+33\s?|0033\s?|\b0)[1-9](?:[\s.-]?\d{2}){4}\b/) || visible.match(/\+\d{2,3}[\s.-]?\d(?:[\s.-]?\d){7,11}\b/);
+    if (m) telephone = radarNormaliserTelephone(m[0]);
+  }
+  return { emails: valides, email: valides[0] || null, instagram, telephone, whatsapp };
 }
 __name(radarExtraireContacts, "radarExtraireContacts");
 __name2(radarExtraireContacts, "radarExtraireContacts");
+var RADAR_PAGES_CONTACT = ["/policies/contact-information", "/policies/privacy-policy", "", "/pages/contact", "/pages/contactez-nous", "/policies/legal-notice", "/pages/mentions-legales", "/policies/terms-of-service"];
 async function radarTrouverContacts(domaine, htmlAccueil) {
-  let trouve = radarExtraireContacts(htmlAccueil, domaine);
-  for (const chemin of ["/pages/contact", "/policies/legal-notice", "/pages/mentions-legales", "/policies/contact-information"]) {
-    if (trouve.email && trouve.instagram) break;
-    try {
-      const page = await radarChargerSite(domaine + chemin);
-      const autre = radarExtraireContacts(page.html, domaine);
-      trouve = { email: trouve.email || autre.email, instagram: trouve.instagram || autre.instagram };
-    } catch {
+  const racine = String(domaine || "").replace(/^www\./, "").split(".").slice(-2).join(".");
+  const emails = [];
+  let instagram = null;
+  let telephone = null;
+  let whatsapp = false;
+  let pagesLues = 0;
+  let derniereErreur = null;
+  for (const chemin of RADAR_PAGES_CONTACT) {
+    const meilleur = emails.length ? radarRangEmail(emails[0], racine) : 9;
+    if (meilleur === 0 && telephone && instagram) break;
+    let html;
+    if (chemin === "" && htmlAccueil !== void 0) html = htmlAccueil;
+    else {
+      try {
+        html = (await radarChargerSite(domaine + chemin)).html;
+      } catch (e) {
+        derniereErreur = e;
+        continue;
+      }
+    }
+    pagesLues += 1;
+    const t = radarExtraireContacts(html, domaine);
+    for (const e of t.emails) if (!emails.includes(e)) emails.push(e);
+    emails.sort((x, y) => radarRangEmail(x, racine) - radarRangEmail(y, racine));
+    instagram = instagram || t.instagram;
+    if (t.telephone && (!telephone || t.whatsapp && !whatsapp)) {
+      telephone = t.telephone;
+      whatsapp = t.whatsapp;
     }
   }
-  return trouve;
+  if (!pagesLues && derniereErreur) throw derniereErreur;
+  return { email: emails[0] || null, instagram, telephone, whatsapp };
 }
 __name(radarTrouverContacts, "radarTrouverContacts");
 __name2(radarTrouverContacts, "radarTrouverContacts");
 async function radarEnregistrerContacts(db, prospectId, domaine, htmlAccueil) {
-  let contacts = { email: null, instagram: null };
+  let contacts = { email: null, instagram: null, telephone: null, whatsapp: false };
   try {
-    if (htmlAccueil === void 0) htmlAccueil = (await radarChargerSite(domaine)).html;
     contacts = await radarTrouverContacts(domaine, htmlAccueil);
   } catch (e) {
     const essais = await db.prepare("UPDATE radar_prospects SET contacts_essais=contacts_essais+1, contacts_erreur=? WHERE id=? RETURNING contacts_essais").bind(String(e?.message || e).slice(0, 200), prospectId).first();
     if (Number(essais?.contacts_essais || 0) < 3) return contacts;
   }
-  await db.prepare("UPDATE radar_prospects SET email_contact=COALESCE(?,email_contact), instagram=COALESCE(?,instagram), contacts_verifies_le=? WHERE id=?").bind(contacts.email, contacts.instagram, (/* @__PURE__ */ new Date()).toISOString(), prospectId).run();
+  await db.prepare("UPDATE radar_prospects SET email_contact=COALESCE(?,email_contact), instagram=COALESCE(?,instagram), telephone=COALESCE(?,telephone), whatsapp=?, contacts_version=2, contacts_verifies_le=? WHERE id=?").bind(contacts.email, contacts.instagram, contacts.telephone, contacts.whatsapp ? 1 : 0, (/* @__PURE__ */ new Date()).toISOString(), prospectId).run();
   return contacts;
 }
 __name(radarEnregistrerContacts, "radarEnregistrerContacts");
@@ -7378,8 +7447,8 @@ async function radarCompleterJour(db, reg) {
   const deja = await db.prepare("SELECT COUNT(*) AS n FROM radar_prospects WHERE presente_le=?").bind(jour).first();
   const manque = reg.parJour - Number(deja?.n || 0);
   const aCompleter = await tous2(db, `SELECT id, domaine FROM radar_prospects
-    WHERE presente_le IS NOT NULL AND contacts_verifies_le IS NULL AND domaine IS NOT NULL AND statut IN ('nouveau','\xE0 v\xE9rifier','\xE0 contacter')
-    ORDER BY presente_le DESC, score DESC LIMIT 3`);
+    WHERE presente_le IS NOT NULL AND (contacts_verifies_le IS NULL OR contacts_version < 2) AND domaine IS NOT NULL AND statut IN ('nouveau','\xE0 v\xE9rifier','\xE0 contacter')
+    ORDER BY presente_le DESC, score DESC LIMIT 5`);
   for (const p of aCompleter) await radarEnregistrerContacts(db, p.id, p.domaine);
   if (manque <= 0) return 0;
   const r = await db.prepare(`UPDATE radar_prospects SET presente_le=? WHERE id IN (
@@ -7706,6 +7775,7 @@ async function pageRadar(env, url, message) {
         </div>
         <div class="meta">
           ${p.email_contact ? `<span>\u2709\uFE0F <a href="mailto:${echapper(p.email_contact)}"><b>${echapper(p.email_contact)}</b></a></span>` : `<span class="sec">\u2709\uFE0F ${p.contacts_verifies_le ? "email introuvable sur le site" : "email en cours de recherche"}</span>`}
+          ${p.telephone ? `<span>${p.whatsapp ? "\u{1F4AC}" : "\u{1F4DE}"} <a href="https://wa.me/${echapper(String(p.telephone).replace(/\D/g, ""))}" target="_blank" rel="noopener"><b>${echapper(p.telephone)}</b></a>${p.whatsapp ? ` <span class="sec">WhatsApp</span>` : ""} <a class="sec" href="tel:${echapper(p.telephone)}">appeler</a></span>` : `<span class="sec">\u{1F4DE} ${p.contacts_verifies_le ? "num\xE9ro introuvable" : "num\xE9ro en cours de recherche"}</span>`}
           ${p.instagram ? `<span>\u{1F4F8} <a href="https://www.instagram.com/${echapper(p.instagram)}/" target="_blank" rel="noopener"><b>@${echapper(p.instagram)}</b></a></span>` : `<span class="sec">\u{1F4F8} ${p.contacts_verifies_le ? "Instagram introuvable" : "Instagram en cours de recherche"}</span>`}
         </div>
         <details style="margin-top:8px"><summary>\u2709\uFE0F Contacter par email</summary>
