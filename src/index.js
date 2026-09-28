@@ -6460,7 +6460,10 @@ async function assurerRadarSchema(db) {
     ["derniere_pub_vue", "TEXT"],
     ["pubs_actives", "INTEGER NOT NULL DEFAULT 0"],
     ["portee_ue", "INTEGER"],
-    ["technos_n", "INTEGER NOT NULL DEFAULT 0"]
+    ["technos_n", "INTEGER NOT NULL DEFAULT 0"],
+    ["email_contact", "TEXT"],
+    ["instagram", "TEXT"],
+    ["contacts_verifies_le", "TEXT"]
   ];
   for (const [nom, type] of ajouts) {
     if (!colonnes.has(nom)) await db.prepare(`ALTER TABLE radar_prospects ADD COLUMN ${nom} ${type}`).run();
@@ -7028,6 +7031,55 @@ async function radarChargerSite(domaine) {
 }
 __name(radarChargerSite, "radarChargerSite");
 __name2(radarChargerSite, "radarChargerSite");
+var RADAR_EMAILS_IGNORES = /(\.(png|jpe?g|gif|webp|svg|css|js)$|example\.|sentry|wixpress|shopify\.com$|domain\.com$|email\.com$|votre|your|test@|noreply|no-reply|@2x)/i;
+var RADAR_INSTA_IGNORES = /^(p|reel|reels|explore|stories|accounts|tv|about|developer|legal|shopify|instagram)$/i;
+function radarExtraireContacts(html, domaine) {
+  const texte = String(html || "").replace(/&#64;|&commat;|\[at\]|\(at\)/gi, "@");
+  const emails = /* @__PURE__ */ new Set();
+  for (const m of texte.matchAll(/mailto:([^"'?>\s]+)/gi)) emails.add(decodeURIComponent(m[1]).toLowerCase());
+  for (const m of texte.matchAll(/[a-z0-9._%+-]+@[a-z0-9-]+(?:\.[a-z0-9-]+)*\.[a-z]{2,}/gi)) emails.add(m[0].toLowerCase());
+  const valides = [...emails].filter((e) => /^[^@\s]+@[^@\s]+\.[a-z]{2,}$/i.test(e) && !RADAR_EMAILS_IGNORES.test(e));
+  const racine = String(domaine || "").replace(/^www\./, "").split(".").slice(-2).join(".");
+  valides.sort((a, b) => Number(b.endsWith("@" + racine) || b.split("@")[1]?.endsWith("." + racine)) - Number(a.endsWith("@" + racine) || a.split("@")[1]?.endsWith("." + racine)));
+  let instagram = null;
+  for (const m of texte.matchAll(/instagram\.com\/([A-Za-z0-9_.]{2,30})/gi)) {
+    const pseudo = m[1].replace(/\.+$/, "");
+    if (!RADAR_INSTA_IGNORES.test(pseudo)) {
+      instagram = pseudo;
+      break;
+    }
+  }
+  return { email: valides[0] || null, instagram };
+}
+__name(radarExtraireContacts, "radarExtraireContacts");
+__name2(radarExtraireContacts, "radarExtraireContacts");
+async function radarTrouverContacts(domaine, htmlAccueil) {
+  let trouve = radarExtraireContacts(htmlAccueil, domaine);
+  for (const chemin of ["/pages/contact", "/policies/legal-notice", "/pages/mentions-legales", "/policies/contact-information"]) {
+    if (trouve.email && trouve.instagram) break;
+    try {
+      const page = await radarChargerSite(domaine + chemin);
+      const autre = radarExtraireContacts(page.html, domaine);
+      trouve = { email: trouve.email || autre.email, instagram: trouve.instagram || autre.instagram };
+    } catch {
+    }
+  }
+  return trouve;
+}
+__name(radarTrouverContacts, "radarTrouverContacts");
+__name2(radarTrouverContacts, "radarTrouverContacts");
+async function radarEnregistrerContacts(db, prospectId, domaine, htmlAccueil) {
+  let contacts = { email: null, instagram: null };
+  try {
+    if (htmlAccueil === void 0) htmlAccueil = (await radarChargerSite(domaine)).html;
+    contacts = await radarTrouverContacts(domaine, htmlAccueil);
+  } catch {
+  }
+  await db.prepare("UPDATE radar_prospects SET email_contact=COALESCE(?,email_contact), instagram=COALESCE(?,instagram), contacts_verifies_le=? WHERE id=?").bind(contacts.email, contacts.instagram, (/* @__PURE__ */ new Date()).toISOString(), prospectId).run();
+  return contacts;
+}
+__name(radarEnregistrerContacts, "radarEnregistrerContacts");
+__name2(radarEnregistrerContacts, "radarEnregistrerContacts");
 async function radarAnalyserAnnonceur(env, annonceur, reg) {
   const db = env.DB;
   const maintenant = (/* @__PURE__ */ new Date()).toISOString();
@@ -7130,6 +7182,7 @@ async function radarAnalyserAnnonceur(env, annonceur, reg) {
       technos.filter((t) => t.detecte).length
     ).run();
     const prospect = await db.prepare("SELECT id FROM radar_prospects WHERE page_id=?").bind(annonceur.pageId).first();
+    if (prospect?.id && qualifie) await radarEnregistrerContacts(db, prospect.id, annonceur.domaine, site.html);
     if (prospect?.id) {
       for (const techno of technos) {
         await db.prepare(`INSERT INTO radar_technos (prospect_id,techno,detecte) VALUES (?,?,?)
@@ -7319,6 +7372,10 @@ async function radarCompleterJour(db, reg) {
   const jour = (/* @__PURE__ */ new Date()).toISOString().slice(0, 10);
   const deja = await db.prepare("SELECT COUNT(*) AS n FROM radar_prospects WHERE presente_le=?").bind(jour).first();
   const manque = reg.parJour - Number(deja?.n || 0);
+  const aCompleter = await tous2(db, `SELECT id, domaine FROM radar_prospects
+    WHERE presente_le IS NOT NULL AND contacts_verifies_le IS NULL AND domaine IS NOT NULL AND statut IN ('nouveau','\xE0 v\xE9rifier','\xE0 contacter')
+    ORDER BY presente_le DESC, score DESC LIMIT 3`);
+  for (const p of aCompleter) await radarEnregistrerContacts(db, p.id, p.domaine);
   if (manque <= 0) return 0;
   const r = await db.prepare(`UPDATE radar_prospects SET presente_le=? WHERE id IN (
       SELECT id FROM radar_prospects
@@ -7368,6 +7425,21 @@ function radarPriorite(s) {
 }
 __name(radarPriorite, "radarPriorite");
 __name2(radarPriorite, "radarPriorite");
+function radarModeleEmail(p, env) {
+  const nom = p.marque || p.domaine || "votre boutique";
+  return `Bonjour l'\xE9quipe ${nom},
+
+J'ai d\xE9couvert ${p.domaine || "votre boutique"} via vos publicit\xE9s et j'ai pris quelques minutes pour analyser votre site.
+
+Vous investissez d\xE9j\xE0 pour attirer des visiteurs : j'ai rep\xE9r\xE9 plusieurs points concrets qui pourraient vous aider \xE0 en convertir davantage en clients (page produit, r\xE9assurance, parcours panier).
+
+Seriez-vous ouverts \xE0 un court \xE9change de 15 minutes pour que je vous les pr\xE9sente ?
+
+Bonne journ\xE9e,
+${env.SENDER_NAME || "AdamEcom"}`;
+}
+__name(radarModeleEmail, "radarModeleEmail");
+__name2(radarModeleEmail, "radarModeleEmail");
 async function pageRadar(env, url, message) {
   const cle = encodeURIComponent(env.CLE_TEST);
   await assurerRadarSchema(env.DB);
@@ -7627,6 +7699,26 @@ async function pageRadar(env, url, message) {
           ${p.domaine ? `<span>${echapper(p.domaine)}</span>` : ""}
           ${p.niche ? `<span>${echapper(p.niche)}</span>` : ""}
         </div>
+        <div class="meta">
+          ${p.email_contact ? `<span>\u2709\uFE0F <a href="mailto:${echapper(p.email_contact)}"><b>${echapper(p.email_contact)}</b></a></span>` : `<span class="sec">\u2709\uFE0F ${p.contacts_verifies_le ? "email introuvable sur le site" : "email en cours de recherche"}</span>`}
+          ${p.instagram ? `<span>\u{1F4F8} <a href="https://www.instagram.com/${echapper(p.instagram)}/" target="_blank" rel="noopener"><b>@${echapper(p.instagram)}</b></a></span>` : `<span class="sec">\u{1F4F8} ${p.contacts_verifies_le ? "Instagram introuvable" : "Instagram en cours de recherche"}</span>`}
+        </div>
+        <details style="margin-top:8px"><summary>\u2709\uFE0F Contacter par email</summary>
+          <form class="f" method="POST" style="border:0;padding:8px 0 0;background:none"
+            action="?cle=${cle}&page=radar&prospect=${p.id}&action=radar_email">
+            <label class="large">Destinataire<input name="a" type="email" required value="${echapper(p.email_contact || "")}" placeholder="contact@boutique.com"></label>
+            <label class="large">Objet<input name="objet" required value="${echapper(`${p.marque || p.domaine || "Votre boutique"} : quelques pistes pour convertir plus`)}"></label>
+            <label class="large">Message<textarea name="message" rows="8" required>${echapper(radarModeleEmail(p, env))}</textarea></label>
+            <button class="envoyer large" type="submit">Envoyer l'email</button>
+          </form>
+        </details>
+        <details style="margin-top:6px"><summary>\u274C \xC9carter ce prospect</summary>
+          <form class="f" method="POST" style="border:0;padding:8px 0 0;background:none"
+            action="?cle=${cle}&page=radar&prospect=${p.id}&action=radar_statut&statut=${encodeURIComponent("non pertinent")}">
+            <label class="large">Motif<select name="motif">${RADAR_MOTIFS.map((m) => `<option>${m}</option>`).join("")}</select></label>
+            <button class="envoyer large" type="submit" style="background:var(--rouge);color:#fff">\xC9carter</button>
+          </form>
+        </details>
       </div>
       <div class="outils">
         ${p.domaine ? `<a class="bouton pale" href="https://${echapper(p.domaine)}" target="_blank" rel="noopener">Boutique</a>` : ""}
@@ -8438,6 +8530,33 @@ async function application(env, url, request) {
           (prospect_id, ancien_statut, nouveau_statut, motif, quand) VALUES (?, ?, ?, ?, ?)`).bind(pid, p?.statut || null, st, motif, (/* @__PURE__ */ new Date()).toISOString()).run();
         return retour(RADAR_SORTIS.includes(st) ? "&rstat=" + encodeURIComponent(st) : "&prospect=" + pid + "&rstat=" + encodeURIComponent(st));
       }
+      if (action === "radar_email") {
+        const pid = Number(url.searchParams.get("prospect"));
+        const p = await env.DB.prepare("SELECT id, statut, marque FROM radar_prospects WHERE id = ?").bind(pid).first();
+        const a = String(form.get("a") || "").trim();
+        const objet = String(form.get("objet") || "").trim();
+        const texte = String(form.get("message") || "").trim();
+        if (!p) return retour("&err=" + encodeURIComponent("Prospect introuvable."));
+        if (!/^[^@\s]+@[^@\s]+\.[a-z]{2,}$/i.test(a) || !objet || !texte) return retour("&err=" + encodeURIComponent("Destinataire, objet et message sont n\xE9cessaires."));
+        try {
+          await envoyerEmail(env, {
+            de: env.SENDER_EMAIL,
+            deNom: env.SENDER_NAME || "AdamEcom",
+            a,
+            objet,
+            html: `<div style="font-family:Arial,sans-serif;font-size:14px;line-height:1.5">${echapper(texte).replace(/\n/g, "<br>")}</div>`,
+            repondreA: { email: env.SENDER_EMAIL, name: env.SENDER_NAME || "AdamEcom" }
+          });
+        } catch (e) {
+          await noterEnvoi(env, "radar", a, objet, "\xE9chec", e.message);
+          return retour("&err=" + encodeURIComponent("Envoi impossible : " + String(e.message || e).slice(0, 200)));
+        }
+        await noterEnvoi(env, "radar", a, objet, "envoy\xE9", null);
+        await env.DB.prepare("UPDATE radar_prospects SET statut='contact\xE9', email_contact=COALESCE(email_contact, ?) WHERE id=?").bind(a, pid).run();
+        await env.DB.prepare(`INSERT INTO radar_historique
+          (prospect_id, ancien_statut, nouveau_statut, motif, quand) VALUES (?, ?, ?, ?, ?)`).bind(pid, p.statut || null, "contact\xE9", "email envoy\xE9 \xE0 " + a, (/* @__PURE__ */ new Date()).toISOString()).run();
+        return retour("&remail=" + encodeURIComponent(a));
+      }
       if (action === "radar_motcle_ajout") {
         const mot = (form.get("mot") || "").trim().toLowerCase();
         const niche = (form.get("niche") || "").trim();
@@ -8731,6 +8850,8 @@ async function application(env, url, request) {
   const seoN = url.searchParams.get("seo");
   if (seoN) message = `<div class="reussite">Analyse SEO termin\xE9e \u2014 <b>${echapper(seoN)}/100</b>.${url.searchParams.get("seopart") ? " La page publi\xE9e n'a pas pu \xEAtre charg\xE9e : les contr\xF4les techniques sont incomplets." : ""}</div>`;
   const rstat = url.searchParams.get("rstat");
+  const remail = url.searchParams.get("remail");
+  if (remail) message = `<div class="reussite">Email envoy\xE9 \xE0 <b>${echapper(remail)}</b>. Le prospect est marqu\xE9 contact\xE9.</div>`;
   if (rstat) message = `<div class="reussite">Prospect marqu\xE9 <b>${echapper(rstat)}</b>.${RADAR_SORTIS.includes(rstat) ? " Il ne r\xE9appara\xEEtra plus dans le Top 10." : ""}</div>`;
   if (url.searchParams.get("rmot") === "1") message = `<div class="reussite">Mot-cl\xE9 ajout\xE9.</div>`;
   if (url.searchParams.get("rmot") === "2") message = `<div class="reussite">Mot-cl\xE9 supprim\xE9.</div>`;
