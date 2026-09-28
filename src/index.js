@@ -7519,6 +7519,67 @@ Fondateur \u2014 AdamEcom
 Consultant Shopify \xB7 Conversion & CRO
 adam-ecom.com
 info@adam-ecom.com`;
+async function dnsTxt(nom, type = "TXT") {
+  try {
+    const r = await fetch(`https://cloudflare-dns.com/dns-query?name=${encodeURIComponent(nom)}&type=${type}`, {
+      headers: { accept: "application/dns-json" },
+      signal: AbortSignal.timeout(8e3)
+    });
+    const d = await r.json();
+    return (d.Answer || []).map((a) => String(a.data || "").replace(/^"|"$/g, "").replace(/" "/g, ""));
+  } catch (e) {
+    return ["erreur: " + String(e?.message || e)];
+  }
+}
+__name(dnsTxt, "dnsTxt");
+__name2(dnsTxt, "dnsTxt");
+async function diagnosticEmail(env, email) {
+  const domaine = String(env.SENDER_EMAIL || "").split("@")[1] || "";
+  const essai = /* @__PURE__ */ __name2(async (f) => {
+    try {
+      return await f();
+    } catch (e) {
+      return { erreur: String(e?.message || e).slice(0, 300) };
+    }
+  }, "essai");
+  const [evenements, expediteurs, domaines, spf, dmarc, dkim1, dkim2, dkimMail] = await Promise.all([
+    essai(() => brevo(env, `/smtp/statistics/events?email=${encodeURIComponent(email)}&limit=30&sort=desc`)),
+    essai(() => brevo(env, "/senders")),
+    essai(() => brevo(env, "/senders/domains")),
+    dnsTxt(domaine),
+    dnsTxt("_dmarc." + domaine),
+    dnsTxt("brevo1._domainkey." + domaine, "CNAME"),
+    dnsTxt("brevo2._domainkey." + domaine, "CNAME"),
+    dnsTxt("mail._domainkey." + domaine)
+  ]);
+  return {
+    quand: (/* @__PURE__ */ new Date()).toISOString(),
+    email,
+    expediteur: env.SENDER_EMAIL,
+    evenements: (evenements.events || []).map((e) => ({ date: e.date, evenement: e.event, raison: e.reason || null, objet: e.subject, id: e.messageId })).slice(0, 30),
+    evenementsErreur: evenements.erreur || null,
+    expediteurs: (expediteurs.senders || []).map((x) => ({ email: x.email, actif: x.active })),
+    expediteursErreur: expediteurs.erreur || null,
+    domaines: (domaines.domains || []).map((x) => ({ domaine: x.domain_name, authentifie: x.authenticated, verifie: x.verified })),
+    domainesErreur: domaines.erreur || null,
+    dns: { domaine, spf: spf.filter((t) => /spf/i.test(t)), dmarc, dkimBrevo1: dkim1, dkimBrevo2: dkim2, dkimMail: dkimMail.filter((t) => /DKIM|p=/i.test(t)) }
+  };
+}
+__name(diagnosticEmail, "diagnosticEmail");
+__name2(diagnosticEmail, "diagnosticEmail");
+async function diagnosticEmailEnAttente(env) {
+  try {
+    const demande = await env.DB.prepare("SELECT valeur FROM radar_reglages WHERE cle='diag_email'").first();
+    if (!demande?.valeur) return;
+    await env.DB.prepare("DELETE FROM radar_reglages WHERE cle='diag_email'").run();
+    const r = await diagnosticEmail(env, demande.valeur);
+    await env.DB.prepare("INSERT OR REPLACE INTO radar_reglages (cle, valeur, maj_le) VALUES ('diag_email_resultat', ?, ?)").bind(JSON.stringify(r), r.quand).run();
+  } catch (e) {
+    console.error("diagnostic email", e?.message || e);
+  }
+}
+__name(diagnosticEmailEnAttente, "diagnosticEmailEnAttente");
+__name2(diagnosticEmailEnAttente, "diagnosticEmailEnAttente");
 function radarHtmlEmail(texte) {
   return `<div style="font-family:Arial,sans-serif;font-size:14px;line-height:1.5">${echapper(texte).replace(/\n/g, "<br>")}</div>`;
 }
@@ -9081,7 +9142,7 @@ var index_default = {
         lancer("radar", executerRadar, env)
       ]));
     } else {
-      ctx.waitUntil(lancer("calendly", executer, env));
+      ctx.waitUntil(Promise.all([lancer("calendly", executer, env), diagnosticEmailEnAttente(env)]));
     }
   },
   // Déclenchement manuel, pratique pour tester sans attendre la planification.
