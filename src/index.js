@@ -183,7 +183,14 @@ async function envoyerSmtpPort(env, m, port) {
   return { messageId: "smtp" };
 }
 async function brevo(env, chemin, options = {}) {
-  if (chemin === "/smtp/email" && env.SMTP_PASSWORD) return envoyerSmtp(env, JSON.parse(options.body || "{}"));
+  if (chemin === "/smtp/email" && env.SMTP_PASSWORD) {
+    try {
+      return await envoyerSmtp(env, JSON.parse(options.body || "{}"));
+    } catch (e) {
+      if (!/\xE9tape connexion/.test(String(e?.message)) || !env.BREVO_API_KEY) throw e;
+      console.error("SMTP injoignable, envoi via Brevo :", e.message);
+    }
+  }
   const res = await fetch(`https://api.brevo.com/v3${chemin}`, {
     ...options,
     headers: {
