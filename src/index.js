@@ -6664,12 +6664,19 @@ async function assurerRadarSchema(db) {
     ["contacts_erreur", "TEXT"],
     ["telephone", "TEXT"],
     ["whatsapp", "INTEGER NOT NULL DEFAULT 0"],
-    ["contacts_version", "INTEGER NOT NULL DEFAULT 0"]
+    ["contacts_version", "INTEGER NOT NULL DEFAULT 0"],
+    ["suivi_jeton", "TEXT"],
+    ["email_envoye_le", "TEXT"],
+    ["email_ouvert_le", "TEXT"],
+    ["email_ouvertures", "INTEGER NOT NULL DEFAULT 0"],
+    ["email_clique_le", "TEXT"],
+    ["email_clics", "INTEGER NOT NULL DEFAULT 0"]
   ];
   for (const [nom, type] of ajouts) {
     if (!colonnes.has(nom)) await db.prepare(`ALTER TABLE radar_prospects ADD COLUMN ${nom} ${type}`).run();
   }
   await db.prepare("CREATE INDEX IF NOT EXISTS idx_radar_prospects_score ON radar_prospects(statut,score DESC)").run();
+  await db.prepare("CREATE INDEX IF NOT EXISTS idx_radar_prospects_suivi ON radar_prospects(suivi_jeton)").run();
   await db.prepare("CREATE INDEX IF NOT EXISTS idx_radar_pubs_page ON radar_pubs(page_id,active)").run();
   await db.prepare("CREATE INDEX IF NOT EXISTS idx_radar_motscles_passage ON radar_motscles(actif,dernier_passage)").run();
 }
@@ -7736,8 +7743,40 @@ async function smtpTestEnAttente(env) {
 }
 __name(smtpTestEnAttente, "smtpTestEnAttente");
 __name2(smtpTestEnAttente, "smtpTestEnAttente");
-function radarHtmlEmail(texte) {
-  return `<div style="font-family:Arial,sans-serif;font-size:14px;line-height:1.5">${echapper(texte).replace(/\n/g, "<br>")}</div>`;
+function radarHtmlEmail(texte, suivi) {
+  if (!suivi) return `<div style="font-family:Arial,sans-serif;font-size:14px;line-height:1.5">${echapper(texte).replace(/\n/g, "<br>")}</div>`;
+  const base = `${suivi.origine}/r/${suivi.jeton}`;
+  const lien = /(https?:\/\/[^\s<>"]+|(?<![@\w.-])(?:[a-z0-9-]+\.)+[a-z]{2,}(?:\/[^\s<>"]*)?)/gi;
+  const corps = String(texte).split(lien).map((morceau, i) => {
+    if (i % 2 === 0) return echapper(morceau);
+    const [, texteLien, fin] = morceau.match(/^(.*?)([.,;:!?)]*)$/);
+    const cible = /^https?:\/\//i.test(texteLien) ? texteLien : "https://" + texteLien;
+    return `<a href="${base}/c?u=${encodeURIComponent(cible)}">${echapper(texteLien)}</a>${echapper(fin)}`;
+  }).join("").replace(/\n/g, "<br>");
+  return `<div style="font-family:Arial,sans-serif;font-size:14px;line-height:1.5">${corps}</div><img src="${base}/o.gif" width="1" height="1" alt="" style="display:block;border:0;width:1px;height:1px">`;
+}
+var RADAR_PIXEL = Uint8Array.from(atob("R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7"), (c) => c.charCodeAt(0));
+async function radarSuiviEmail(env, url) {
+  const m = url.pathname.match(/^\/r\/([a-f0-9]{32})\/(o\.gif|c)$/);
+  if (!m) return null;
+  const [, jeton, type] = m;
+  const maintenant = (/* @__PURE__ */ new Date()).toISOString();
+  const p = await env.DB.prepare("SELECT id, email_envoye_le FROM radar_prospects WHERE suivi_jeton = ?").bind(jeton).first().catch(() => null);
+  const trop_tot = p?.email_envoye_le && Date.now() - Date.parse(p.email_envoye_le) < 2e4;
+  if (p && !trop_tot) {
+    if (type === "c") await env.DB.prepare("UPDATE radar_prospects SET email_clics=email_clics+1, email_clique_le=COALESCE(email_clique_le, ?), email_ouvert_le=COALESCE(email_ouvert_le, ?), email_ouvertures=MAX(email_ouvertures, 1) WHERE id=?").bind(maintenant, maintenant, p.id).run();
+    else await env.DB.prepare("UPDATE radar_prospects SET email_ouvertures=email_ouvertures+1, email_ouvert_le=COALESCE(email_ouvert_le, ?) WHERE id=?").bind(maintenant, p.id).run();
+  }
+  if (type === "c") {
+    const cible = url.searchParams.get("u") || "";
+    if (!p || !/^https?:\/\//i.test(cible)) return new Response("Lien introuvable", { status: 404 });
+    return Response.redirect(cible, 302);
+  }
+  return new Response(RADAR_PIXEL, { headers: { "content-type": "image/gif", "cache-control": "no-store, max-age=0" } });
+}
+function radarSuiviBadges(p) {
+  if (!p.email_envoye_le) return "";
+  return `<span>\u{1F4E8} envoy\xE9 le ${dateFr2(p.email_envoye_le, false)}</span>` + (p.email_ouvertures ? `<span class="prio encours">\u{1F440} ouvert ${p.email_ouvertures} fois (le ${dateFr2(p.email_ouvert_le, false)})</span>` : `<span class="sec">pas encore ouvert</span>`) + (p.email_clics ? `<span class="prio haute">\u{1F517} cliqu\xE9 ${p.email_clics} fois</span>` : "");
 }
 __name(radarHtmlEmail, "radarHtmlEmail");
 __name2(radarHtmlEmail, "radarHtmlEmail");
@@ -8031,6 +8070,7 @@ async function pageRadar(env, url, message) {
           ${p.telephone ? `<span>${p.whatsapp ? "\u{1F4AC}" : "\u{1F4DE}"} <a href="https://wa.me/${echapper(String(p.telephone).replace(/\D/g, ""))}" target="_blank" rel="noopener"><b>${echapper(p.telephone)}</b></a>${p.whatsapp ? ` <span class="sec">WhatsApp</span>` : ""} <a class="sec" href="tel:${echapper(p.telephone)}">appeler</a></span>` : `<span class="sec">\u{1F4DE} ${p.contacts_verifies_le ? "num\xE9ro introuvable" : "num\xE9ro en cours de recherche"}</span>`}
           ${p.instagram ? `<span>\u{1F4F8} <a href="https://www.instagram.com/${echapper(p.instagram)}/" target="_blank" rel="noopener"><b>@${echapper(p.instagram)}</b></a></span>` : `<span class="sec">\u{1F4F8} ${p.contacts_verifies_le ? "Instagram introuvable" : "Instagram en cours de recherche"}</span>`}
         </div>
+        ${p.email_envoye_le ? `<div class="meta">${radarSuiviBadges(p)}</div>` : ""}
         <details style="margin-top:8px"><summary>\u2709\uFE0F Contacter par email</summary>
           <form class="f" method="POST" style="border:0;padding:8px 0 0;background:none"
             action="?cle=${cle}&page=radar&prospect=${p.id}&action=radar_email">
@@ -8077,11 +8117,12 @@ async function pageRadar(env, url, message) {
       <section><h2>${titre}</h2>
         ${vue === "ecartes" ? `<p class="sec" style="margin:-4px 0 0">Elles ne r\xE9appara\xEEtront plus dans les prospects du jour. \xAB Remettre \xBB les renvoie dans la liste.</p>` : ""}
         ${tableauHtml(
-      [{ nom: "Boutique" }, { nom: "Contact" }, { nom: vue === "ecartes" ? "Motif" : "Statut" }, { nom: "Date", classe: "nowrap" }, { nom: "" }],
+      [{ nom: "Boutique" }, { nom: "Contact" }, { nom: vue === "ecartes" ? "Motif" : "Statut" }, ...vue === "ecartes" ? [] : [{ nom: "Suivi email" }], { nom: "Date", classe: "nowrap" }, { nom: "" }],
       liste.map((p) => `<tr>
           <td><a href="?cle=${cle}&page=radar&prospect=${p.id}"><b>${echapper(p.marque || p.domaine || p.page_id)}</b></a><br><span class="sec">${echapper(p.domaine || "")}</span></td>
           <td>${p.email_contact ? `<a href="mailto:${echapper(p.email_contact)}">${echapper(p.email_contact)}</a>` : '<span class="sec">\u2014</span>'}${p.telephone ? `<br><a href="https://wa.me/${echapper(String(p.telephone).replace(/\D/g, ""))}" target="_blank" rel="noopener">${echapper(p.telephone)}</a>` : ""}</td>
           <td>${echapper(vue === "ecartes" ? p.motif_rejet || p.statut : p.statut)}</td>
+          ${vue === "ecartes" ? "" : `<td class="meta">${radarSuiviBadges(p) || '<span class="sec">\u2014</span>'}</td>`}
           <td class="nowrap">${p.change_le ? dateFr2(p.change_le, false) : "\u2014"}</td>
           <td class="nowrap">${vue === "ecartes" ? `<form method="POST" style="display:inline" action="?cle=${cle}&page=radar&prospect=${p.id}&action=radar_statut&statut=nouveau&onglet=ecartes"><button class="envoyer discret" type="submit">Remettre</button></form>` : `<a class="bouton pale" href="?cle=${cle}&page=radar&prospect=${p.id}">Ouvrir</a>`}</td>
         </tr>`),
@@ -8927,13 +8968,14 @@ async function application(env, url, request) {
         const texte = String(form.get("message") || "").trim();
         if (!p) return retour("&err=" + encodeURIComponent("Prospect introuvable."));
         if (!/^[^@\s]+@[^@\s]+\.[a-z]{2,}$/i.test(a) || !objet || !texte) return retour("&err=" + encodeURIComponent("Destinataire, objet et message sont n\xE9cessaires."));
+        const jeton = crypto.randomUUID().replace(/-/g, "");
         try {
           await envoyerEmail(env, {
             de: env.SENDER_EMAIL,
             deNom: env.SENDER_NAME || "AdamEcom",
             a,
             objet,
-            html: radarHtmlEmail(texte),
+            html: radarHtmlEmail(texte, { origine: url.origin, jeton }),
             repondreA: { email: env.SENDER_EMAIL, name: env.SENDER_NAME || "AdamEcom" }
           });
         } catch (e) {
@@ -8941,7 +8983,7 @@ async function application(env, url, request) {
           return retour("&err=" + encodeURIComponent("Envoi impossible : " + String(e.message || e).slice(0, 200)));
         }
         await noterEnvoi(env, "radar", a, objet, "envoy\xE9", null);
-        await env.DB.prepare("UPDATE radar_prospects SET statut='contact\xE9', email_contact=COALESCE(email_contact, ?) WHERE id=?").bind(a, pid).run();
+        await env.DB.prepare("UPDATE radar_prospects SET statut='contact\xE9', email_contact=COALESCE(email_contact, ?), suivi_jeton=?, email_envoye_le=?, email_ouvert_le=NULL, email_ouvertures=0, email_clique_le=NULL, email_clics=0 WHERE id=?").bind(a, jeton, (/* @__PURE__ */ new Date()).toISOString(), pid).run();
         await env.DB.prepare(`INSERT INTO radar_historique
           (prospect_id, ancien_statut, nouveau_statut, motif, quand) VALUES (?, ?, ?, ?, ?)`).bind(pid, p.statut || null, "contact\xE9", "email envoy\xE9 \xE0 " + a, (/* @__PURE__ */ new Date()).toISOString()).run();
         return retour("&remail=" + encodeURIComponent(a));
@@ -9314,6 +9356,10 @@ var index_default = {
       if (!code) return Response.redirect(`${base}&err=${encodeURIComponent("Code d'autorisation absent.")}`, 302);
       const r = await finAutorisation(env, code, url.origin);
       return Response.redirect(r.ok ? `${base}&gok=1` : `${base}&err=${encodeURIComponent(r.erreur)}`, 302);
+    }
+    if (url.pathname.startsWith("/r/")) {
+      const r = await radarSuiviEmail(env, url);
+      if (r) return r;
     }
     if (url.pathname.startsWith("/f/")) {
       const f = await lireFactureParJeton(env.DB, url.pathname.slice(3));
