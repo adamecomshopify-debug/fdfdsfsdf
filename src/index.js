@@ -7444,7 +7444,7 @@ __name(executerRadar, "executerRadar");
 __name2(executerRadar, "executerRadar");
 async function radarCompleterJour(db, reg) {
   const jour = (/* @__PURE__ */ new Date()).toISOString().slice(0, 10);
-  const deja = await db.prepare("SELECT COUNT(*) AS n FROM radar_prospects WHERE presente_le=?").bind(jour).first();
+  const deja = await db.prepare("SELECT COUNT(*) AS n FROM radar_prospects WHERE presente_le=? AND statut NOT IN ('non pertinent','d\xE9j\xE0 optimis\xE9')").bind(jour).first();
   const manque = reg.parJour - Number(deja?.n || 0);
   const aCompleter = await tous2(db, `SELECT id, domaine FROM radar_prospects
     WHERE presente_le IS NOT NULL AND (contacts_verifies_le IS NULL OR contacts_version < 2) AND domaine IS NOT NULL AND statut IN ('nouveau','\xE0 v\xE9rifier','\xE0 contacter')
@@ -7836,7 +7836,43 @@ async function pageRadar(env, url, message) {
         <a class="bouton pale" href="?cle=${cle}&page=radar&prospect=${p.id}">Ouvrir</a>
       </div></div>`;
   }, "carte");
+  const onglets = `<section><div class="actions">
+      ${[["jour", "Prospects du jour"], ["a_contacter", `\xC0 contacter (${par["\xE0 contacter"] || 0})`], ["contactes", `Contact\xE9s (${(par["contact\xE9"] || 0) + (par["r\xE9pondu"] || 0) + (par["rdv"] || 0) + (par["client"] || 0)})`], ["ecartes", `Boutiques \xE9cart\xE9es (${(par["non pertinent"] || 0) + (par["d\xE9j\xE0 optimis\xE9"] || 0)})`]].map(([v, lib]) => `<a class="bouton${vue === v ? "" : " pale"}" href="?cle=${cle}&page=radar&vue=${v}">${lib}</a>`).join("")}
+    </div></section>`;
+  const ONGLETS_STATUTS = {
+    a_contacter: ["\xE0 contacter"],
+    contactes: ["contact\xE9", "r\xE9pondu", "rdv", "client"],
+    ecartes: ["non pertinent", "d\xE9j\xE0 optimis\xE9"]
+  };
+  if (ONGLETS_STATUTS[vue]) {
+    const statuts = ONGLETS_STATUTS[vue];
+    const liste = await tous2(env.DB, `SELECT p.*, (SELECT MAX(h.quand) FROM radar_historique h WHERE h.prospect_id=p.id) AS change_le
+      FROM radar_prospects p WHERE p.statut IN (${statuts.map(() => "?").join(",")}) ORDER BY change_le DESC, p.id DESC LIMIT 200`, ...statuts);
+    if (vue === "a_contacter") {
+      return `${message || ""}${onglets}
+        <section><h2>\xC0 contacter</h2>
+          ${liste.length ? `<div class="taches">${liste.map(carte).join("")}</div>` : `<div class="tw"><div class="vide">Aucun prospect marqu\xE9 \xE0 contacter.</div></div>`}
+        </section>`;
+    }
+    const titre = vue === "ecartes" ? "Boutiques \xE9cart\xE9es" : "Boutiques contact\xE9es";
+    return `${message || ""}${onglets}
+      <section><h2>${titre}</h2>
+        ${vue === "ecartes" ? `<p class="sec" style="margin:-4px 0 0">Elles ne r\xE9appara\xEEtront plus dans les prospects du jour. \xAB Remettre \xBB les renvoie dans la liste.</p>` : ""}
+        ${tableauHtml(
+      [{ nom: "Boutique" }, { nom: "Contact" }, { nom: vue === "ecartes" ? "Motif" : "Statut" }, { nom: "Date", classe: "nowrap" }, { nom: "" }],
+      liste.map((p) => `<tr>
+          <td><a href="?cle=${cle}&page=radar&prospect=${p.id}"><b>${echapper(p.marque || p.domaine || p.page_id)}</b></a><br><span class="sec">${echapper(p.domaine || "")}</span></td>
+          <td>${p.email_contact ? `<a href="mailto:${echapper(p.email_contact)}">${echapper(p.email_contact)}</a>` : '<span class="sec">\u2014</span>'}${p.telephone ? `<br><a href="https://wa.me/${echapper(String(p.telephone).replace(/\D/g, ""))}" target="_blank" rel="noopener">${echapper(p.telephone)}</a>` : ""}</td>
+          <td>${echapper(vue === "ecartes" ? p.motif_rejet || p.statut : p.statut)}</td>
+          <td class="nowrap">${p.change_le ? dateFr2(p.change_le, false) : "\u2014"}</td>
+          <td class="nowrap">${vue === "ecartes" ? `<form method="POST" style="display:inline" action="?cle=${cle}&page=radar&prospect=${p.id}&action=radar_statut&statut=nouveau&onglet=ecartes"><button class="envoyer discret" type="submit">Remettre</button></form>` : `<a class="bouton pale" href="?cle=${cle}&page=radar&prospect=${p.id}">Ouvrir</a>`}</td>
+        </tr>`),
+      vue === "ecartes" ? "Aucune boutique \xE9cart\xE9e." : "Aucune boutique contact\xE9e pour le moment."
+    )}
+      </section>`;
+  }
   return `${message || ""}
+    ${onglets}
     ${sansJeton || !sourceDisponible ? installation : ""}
 
     <section><div class="grille">
@@ -8640,6 +8676,8 @@ async function application(env, url, request) {
         await env.DB.prepare("UPDATE radar_prospects SET statut=?, motif_rejet=? WHERE id=?").bind(st, motif, pid).run();
         await env.DB.prepare(`INSERT INTO radar_historique
           (prospect_id, ancien_statut, nouveau_statut, motif, quand) VALUES (?, ?, ?, ?, ?)`).bind(pid, p?.statut || null, st, motif, (/* @__PURE__ */ new Date()).toISOString()).run();
+        const onglet = url.searchParams.get("onglet");
+        if (onglet && /^[a-z_]+$/.test(onglet)) return retour("&vue=" + onglet + "&rstat=" + encodeURIComponent(st));
         return retour(RADAR_SORTIS.includes(st) ? "&rstat=" + encodeURIComponent(st) : "&prospect=" + pid + "&rstat=" + encodeURIComponent(st));
       }
       if (action === "radar_email_test") {
