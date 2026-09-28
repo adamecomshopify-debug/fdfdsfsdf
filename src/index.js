@@ -7519,6 +7519,11 @@ Fondateur \u2014 AdamEcom
 Consultant Shopify \xB7 Conversion & CRO
 adam-ecom.com
 info@adam-ecom.com`;
+function radarHtmlEmail(texte) {
+  return `<div style="font-family:Arial,sans-serif;font-size:14px;line-height:1.5">${echapper(texte).replace(/\n/g, "<br>")}</div>`;
+}
+__name(radarHtmlEmail, "radarHtmlEmail");
+__name2(radarHtmlEmail, "radarHtmlEmail");
 function radarModeleEmail(p, reg) {
   const nom = p.marque || p.domaine || "votre boutique";
   const remplir = /* @__PURE__ */ __name2((t) => String(t).replace(/\{\s*nom de la boutique\s*\}/gi, nom), "remplir");
@@ -7730,6 +7735,12 @@ async function pageRadar(env, url, message) {
           <label class="large">Message<textarea name="email_corps" rows="18" required>${echapper(reg.brut.email_corps || RADAR_EMAIL_CORPS_DEFAUT)}</textarea></label>
           <button class="envoyer large" type="submit">Enregistrer le mod\xE8le</button>
         </form>
+        <form class="f rapide" method="POST" action="?cle=${cle}&page=radar&action=radar_email_test">
+          <label class="large">Envoyer un test \xE0<input name="a" type="email" required value="${echapper(env.NOTIF_EMAIL || env.SENDER_EMAIL || "")}"></label>
+          <label>Nom de boutique d'exemple<input name="boutique" value="Boutique Exemple"></label>
+          <button class="envoyer" type="submit">Envoyer un test</button>
+        </form>
+        <p class="sec" style="margin:0">Le test utilise le mod\xE8le enregistr\xE9 et ne touche \xE0 aucun prospect.</p>
       </section>
 
       <section><h2>R\xE9glages du radar</h2>
@@ -8631,6 +8642,27 @@ async function application(env, url, request) {
           (prospect_id, ancien_statut, nouveau_statut, motif, quand) VALUES (?, ?, ?, ?, ?)`).bind(pid, p?.statut || null, st, motif, (/* @__PURE__ */ new Date()).toISOString()).run();
         return retour(RADAR_SORTIS.includes(st) ? "&rstat=" + encodeURIComponent(st) : "&prospect=" + pid + "&rstat=" + encodeURIComponent(st));
       }
+      if (action === "radar_email_test") {
+        const a = String(form.get("a") || "").trim();
+        if (!/^[^@\s]+@[^@\s]+\.[a-z]{2,}$/i.test(a)) return retour("&vue=reglages&err=" + encodeURIComponent("Adresse de test invalide."));
+        const reg = await radarReglages(env.DB);
+        const modele = radarModeleEmail({ marque: String(form.get("boutique") || "").trim() || "Boutique Exemple" }, reg);
+        try {
+          await envoyerEmail(env, {
+            de: env.SENDER_EMAIL,
+            deNom: env.SENDER_NAME || "AdamEcom",
+            a,
+            objet: "[TEST] " + modele.objet,
+            html: radarHtmlEmail(modele.corps),
+            repondreA: { email: env.SENDER_EMAIL, name: env.SENDER_NAME || "AdamEcom" }
+          });
+        } catch (e) {
+          await noterEnvoi(env, "radar_test", a, modele.objet, "\xE9chec", e.message);
+          return retour("&vue=reglages&err=" + encodeURIComponent("Envoi impossible : " + String(e.message || e).slice(0, 200)));
+        }
+        await noterEnvoi(env, "radar_test", a, modele.objet, "envoy\xE9", null);
+        return retour("&vue=reglages&remail=" + encodeURIComponent(a) + "&rtest=1");
+      }
       if (action === "radar_email") {
         const pid = Number(url.searchParams.get("prospect"));
         const p = await env.DB.prepare("SELECT id, statut, marque FROM radar_prospects WHERE id = ?").bind(pid).first();
@@ -8645,7 +8677,7 @@ async function application(env, url, request) {
             deNom: env.SENDER_NAME || "AdamEcom",
             a,
             objet,
-            html: `<div style="font-family:Arial,sans-serif;font-size:14px;line-height:1.5">${echapper(texte).replace(/\n/g, "<br>")}</div>`,
+            html: radarHtmlEmail(texte),
             repondreA: { email: env.SENDER_EMAIL, name: env.SENDER_NAME || "AdamEcom" }
           });
         } catch (e) {
@@ -8952,7 +8984,7 @@ async function application(env, url, request) {
   if (seoN) message = `<div class="reussite">Analyse SEO termin\xE9e \u2014 <b>${echapper(seoN)}/100</b>.${url.searchParams.get("seopart") ? " La page publi\xE9e n'a pas pu \xEAtre charg\xE9e : les contr\xF4les techniques sont incomplets." : ""}</div>`;
   const rstat = url.searchParams.get("rstat");
   const remail = url.searchParams.get("remail");
-  if (remail) message = `<div class="reussite">Email envoy\xE9 \xE0 <b>${echapper(remail)}</b>. Le prospect est marqu\xE9 contact\xE9.</div>`;
+  if (remail) message = url.searchParams.get("rtest") ? `<div class="reussite">Email de test envoy\xE9 \xE0 <b>${echapper(remail)}</b>.</div>` : `<div class="reussite">Email envoy\xE9 \xE0 <b>${echapper(remail)}</b>. Le prospect est marqu\xE9 contact\xE9.</div>`;
   if (rstat) message = `<div class="reussite">Prospect marqu\xE9 <b>${echapper(rstat)}</b>.${RADAR_SORTIS.includes(rstat) ? " Il ne r\xE9appara\xEEtra plus dans le Top 10." : ""}</div>`;
   if (url.searchParams.get("rmot") === "1") message = `<div class="reussite">Mot-cl\xE9 ajout\xE9.</div>`;
   if (url.searchParams.get("rmot") === "2") message = `<div class="reussite">Mot-cl\xE9 supprim\xE9.</div>`;
