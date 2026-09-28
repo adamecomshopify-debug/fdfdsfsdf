@@ -6463,7 +6463,9 @@ async function assurerRadarSchema(db) {
     ["technos_n", "INTEGER NOT NULL DEFAULT 0"],
     ["email_contact", "TEXT"],
     ["instagram", "TEXT"],
-    ["contacts_verifies_le", "TEXT"]
+    ["contacts_verifies_le", "TEXT"],
+    ["contacts_essais", "INTEGER NOT NULL DEFAULT 0"],
+    ["contacts_erreur", "TEXT"]
   ];
   for (const [nom, type] of ajouts) {
     if (!colonnes.has(nom)) await db.prepare(`ALTER TABLE radar_prospects ADD COLUMN ${nom} ${type}`).run();
@@ -7019,7 +7021,8 @@ async function radarChargerSite(domaine) {
     redirect: "follow",
     headers: {
       accept: "text/html,application/xhtml+xml",
-      "user-agent": "Mozilla/5.0 (compatible; AdamEcomProspectRadar/1.0; +https://adam-ecom.com)"
+      "accept-language": "fr-FR,fr;q=0.9,en;q=0.8",
+      "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0 Safari/537.36"
     },
     signal: AbortSignal.timeout(15e3)
   });
@@ -7073,7 +7076,9 @@ async function radarEnregistrerContacts(db, prospectId, domaine, htmlAccueil) {
   try {
     if (htmlAccueil === void 0) htmlAccueil = (await radarChargerSite(domaine)).html;
     contacts = await radarTrouverContacts(domaine, htmlAccueil);
-  } catch {
+  } catch (e) {
+    const essais = await db.prepare("UPDATE radar_prospects SET contacts_essais=contacts_essais+1, contacts_erreur=? WHERE id=? RETURNING contacts_essais").bind(String(e?.message || e).slice(0, 200), prospectId).first();
+    if (Number(essais?.contacts_essais || 0) < 3) return contacts;
   }
   await db.prepare("UPDATE radar_prospects SET email_contact=COALESCE(?,email_contact), instagram=COALESCE(?,instagram), contacts_verifies_le=? WHERE id=?").bind(contacts.email, contacts.instagram, (/* @__PURE__ */ new Date()).toISOString(), prospectId).run();
   return contacts;
