@@ -7838,6 +7838,69 @@ var RADAR_CT_STATUTS = {
   rdv: { lib: "Rendez-vous", ton: "jaune" },
   client: { lib: "Client", ton: "vert" }
 };
+var RADAR_JR_CSS = `<style>
+.ct-kpi{display:grid;grid-template-columns:repeat(4,1fr);gap:12px}
+.ct-kpi div{background:var(--surface);border:1px solid var(--trait);border-radius:var(--r);padding:16px 18px}
+.ct-kpi b{display:block;font-size:28px;font-weight:700;letter-spacing:-.04em;line-height:1.1}
+.ct-kpi span{font-size:12.5px;color:var(--gris)}
+.ct-kpi em{font-style:normal;font-size:13px;color:var(--doux);margin-left:6px;font-weight:500}
+.jr-radar{display:flex;flex-wrap:wrap;align-items:center;gap:8px 14px;margin-top:12px;padding:10px 14px;border:1px solid var(--trait);border-radius:var(--r);background:var(--surface2);font-size:12.5px;color:var(--doux)}
+.jr-point{width:8px;height:8px;border-radius:50%;background:var(--vert);flex-shrink:0}
+.jr-point.rouge{background:var(--rouge)}
+.jr-radar-actions{margin-left:auto;display:flex;flex-wrap:wrap;gap:6px;align-items:center}
+.jr-radar-actions form{margin:0}
+.jr-radar-actions a,.jr-radar-actions button{font:inherit;font-size:12.5px;padding:5px 11px;border-radius:7px;border:1px solid var(--trait-fort);background:var(--surface);color:var(--encre);text-decoration:none;cursor:pointer;white-space:nowrap}
+.jr-radar-actions a:hover,.jr-radar-actions button:hover{background:var(--surface3)}
+.jr-intro{margin:-4px 0 14px;font-size:13.5px;color:var(--gris)}
+.jr-groupe{display:flex;flex-wrap:wrap;align-items:center;gap:10px 16px;margin:0 0 12px;padding:12px 16px;background:var(--jaune-p);border:1px solid var(--trait);border-radius:var(--r);position:sticky;top:8px;z-index:5}
+.jr-tout{display:flex;align-items:center;gap:8px;font-size:13.5px;font-weight:600;cursor:pointer}
+.jr-info{font-size:13px;color:var(--doux)}
+.jr-groupe .envoyer{margin-left:auto}
+.jr-liste{background:var(--surface);border:1px solid var(--trait);border-radius:var(--r);overflow:hidden}
+.jr-ligne{display:grid;grid-template-columns:28px 64px minmax(0,1fr);gap:16px;padding:18px 20px;border-bottom:1px solid var(--trait);align-items:start}
+.jr-ligne:last-child{border-bottom:0}
+.jr-ligne:hover{background:var(--surface2)}
+.jr-ligne:has(.coche-groupe:checked){background:var(--jaune-p)}
+.jr-coche{padding-top:18px}
+.jr-coche input,.jr-tout input{width:18px;height:18px;accent-color:var(--encre);cursor:pointer;margin:0}
+.jr-score{width:64px;height:64px;border-radius:14px;background:var(--surface3);display:flex;flex-direction:column;align-items:center;justify-content:center;line-height:1}
+.jr-score b{font-size:22px;font-weight:700;letter-spacing:-.04em}
+.jr-score span{font-size:10.5px;color:var(--gris);margin-top:3px}
+.jr-score.fort{background:var(--vertf);color:var(--vert)}
+.jr-score.moyen{background:var(--jaune-p);color:var(--jaune-f)}
+.jr-corps{min-width:0;display:flex;flex-direction:column;gap:8px}
+.jr-tete{display:flex;flex-wrap:wrap;align-items:baseline;gap:4px 12px}
+.jr-nom{font-size:17px;font-weight:650;letter-spacing:-.015em;text-decoration:none}
+.jr-nom:hover{text-decoration:underline;text-underline-offset:3px}
+.jr-dom{font-size:13px;color:var(--gris);text-decoration:none}
+.jr-dom:hover{color:var(--encre)}
+.jr-tags{display:flex;flex-wrap:wrap;gap:6px}
+.jr-tag{font-size:12px;padding:3px 9px;border-radius:999px;background:var(--surface3);color:var(--doux);white-space:nowrap}
+.jr-tag.vert{background:var(--vertf);color:var(--vert);font-weight:600}
+.jr-tag.jaune{background:var(--jaune-p);color:var(--jaune-f)}
+.jr-tag.rouge{background:var(--rougef);color:var(--rouge)}
+.jr-contacts{display:flex;flex-wrap:wrap;gap:6px 18px;font-size:13.5px}
+.jr-c{color:var(--gris);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%}
+.jr-c.ok{color:var(--encre);font-weight:500;text-decoration:none}
+.jr-c.ok:hover{text-decoration:underline;text-underline-offset:3px}
+.jr-etat{font-size:13px;color:var(--jaune-f);font-weight:500}
+.jr-etat.rouge{color:var(--rouge)}
+.jr-outils{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin-top:2px}
+.jr-outils details[open]{flex-basis:100%;order:10}
+.jr-outils summary::before,.jr-outils summary::after{display:none!important}
+.jr-outils details summary{display:inline-flex}
+.jr-outils summary{list-style:none;cursor:pointer;font-size:13px;font-weight:500;padding:6px 12px;border-radius:8px;border:1px solid var(--trait-fort);background:var(--surface);user-select:none}
+.jr-outils summary::-webkit-details-marker{display:none}
+.jr-outils summary:hover{background:var(--surface3)}
+.jr-outils details[open] summary{background:var(--encre);color:var(--fond);border-color:var(--encre)}
+.jr-outils details.ecarter summary{color:var(--rouge)}
+.jr-outils details.ecarter[open] summary{background:var(--rouge);border-color:var(--rouge);color:#fff}
+.jr-outils details form{max-width:none;width:100%;margin:10px 0 0;padding:16px;border:1px solid var(--trait);border-radius:var(--r);background:var(--surface2)}
+.jr-lien{margin-left:auto;font-size:13px;color:var(--gris);text-decoration:none}
+.jr-lien:hover{color:var(--encre)}
+.jr-ligne .meta{display:flex;flex-wrap:wrap;gap:6px 12px;font-size:12px;color:var(--gris)}
+@media(max-width:700px){.ct-kpi{grid-template-columns:1fr 1fr}.jr-ligne{grid-template-columns:22px 52px minmax(0,1fr);gap:12px;padding:16px 14px}.jr-score{width:52px;height:52px}.jr-score b{font-size:18px}.jr-radar-actions{margin-left:0}.jr-groupe .envoyer{margin-left:0;width:100%}}
+</style>`;
 function radarVueContactes(liste, cle) {
   const n = liste.length;
   const envoyes = liste.filter((p) => p.email_envoye_le);
@@ -8217,63 +8280,69 @@ async function pageRadar(env, url, message) {
   const barreGroupe = (liste) => {
     const n = liste.filter((p) => p.email_contact && !p.email_programme_le && !["contact\xE9", "r\xE9pondu", "rdv", "client"].includes(p.statut)).length;
     if (!n) return "";
-    return `<form id="envoi-groupe" class="actions" method="POST" style="margin:8px 0"
+    return `<form id="envoi-groupe" class="jr-groupe" method="POST"
         action="?cle=${cle}&page=radar&vue=${encodeURIComponent(vue)}&action=radar_email_groupe"
         onsubmit="var k=document.querySelectorAll('.coche-groupe:checked').length;if(!k){alert('Cochez au moins un prospect.');return false}return confirm('Envoyer votre mod\\xE8le d\\x27email \\xE0 '+k+' boutique(s) ?')">
-      <button class="bouton pale" type="button" onclick="var c=document.querySelectorAll('.coche-groupe'),t=[].some.call(c,function(x){return !x.checked});c.forEach(function(x){x.checked=t})">Tout cocher / d\xE9cocher</button>
+      <label class="jr-tout"><input type="checkbox" onchange="var c=this.checked;document.querySelectorAll('.coche-groupe').forEach(function(x){x.checked=c});this.form.querySelector('.jr-n').textContent=document.querySelectorAll('.coche-groupe:checked').length"> Tout s\xE9lectionner</label>
+      <span class="jr-info"><b class="jr-n">0</b> s\xE9lectionn\xE9(s) sur ${n} avec email \xB7 envoi progressif, ${RADAR_ENVOIS_PAR_MINUTE} par minute</span>
       <button class="envoyer" type="submit">\u2709\uFE0F Envoyer le mod\xE8le \xE0 la s\xE9lection</button>
-      <span class="sec">${n} prospect(s) avec email \xB7 envoi progressif, ${RADAR_ENVOIS_PAR_MINUTE} par minute</span>
-    </form>`;
+    </form>
+    <script>document.addEventListener("change",function(e){if(e.target.classList&&e.target.classList.contains("coche-groupe")){var n=document.querySelector(".jr-n");if(n)n.textContent=document.querySelectorAll(".coche-groupe:checked").length}});</script>`;
   };
   const carte = /* @__PURE__ */ __name2((p) => {
-    const prio = radarPriorite(p.score || 0);
     const jPub = radarJoursDepuis(p.premiere_pub_vue);
     const estWeb = radarEstSourceWeb(p.source);
     const cochable = p.email_contact && !p.email_programme_le && !["contact\xE9", "r\xE9pondu", "rdv", "client"].includes(p.statut);
-    return `<div class="tache">
-      <div class="corps">
-        ${cochable ? `<label style="float:right;font-size:13px;cursor:pointer"><input type="checkbox" name="ids" value="${p.id}" form="envoi-groupe" class="coche-groupe"> s\xE9lectionner</label>` : ""}
-        <a class="t" href="?cle=${cle}&page=radar&prospect=${p.id}">
-          ${prio.icone} ${p.score ?? "\u2014"}/100 \u2014 ${echapper(p.marque || p.domaine || p.page_id)}</a>
-        <div class="meta">
-          ${p.shopify_statut === "oui" ? `<span class="prio encours">Shopify</span>` : ""}
-          ${p.categorie === "A" ? `<span class="prio haute">nouvelle acquisition</span>` : ""}
-          ${estWeb ? `<span class="prio encours">${echapper(radarLibelleSource(p.source))}</span>` : `<span>${p.pubs_actives ?? "?"} publicit\xE9s actives</span>`}
-          ${!estWeb && jPub !== null ? `<span>premi\xE8re pub d\xE9tect\xE9e il y a ${jPub} j</span>` : ""}
-          ${p.pagespeed_score !== null && p.pagespeed_score !== void 0 ? `<span class="${p.pagespeed_score < 40 ? "retard" : ""}">PageSpeed ${p.pagespeed_score}</span>` : ""}
-          ${p.domaine ? `<span>${echapper(p.domaine)}</span>` : ""}
-          ${p.niche ? `<span>${echapper(p.niche)}</span>` : ""}
+    const sc = p.score ?? 0;
+    const ton = sc >= 65 ? "fort" : sc >= 50 ? "moyen" : "";
+    const nom = p.marque || p.domaine || p.page_id || "Boutique";
+    const cherche = p.contacts_verifies_le ? "introuvable" : "en recherche";
+    const tel = p.telephone ? String(p.telephone).replace(/\D/g, "") : "";
+    const modele = radarModeleEmail(p, reg);
+    return `<article class="jr-ligne${cochable ? " cochable" : ""}">
+      <div class="jr-coche">${cochable ? `<input type="checkbox" name="ids" value="${p.id}" form="envoi-groupe" class="coche-groupe" aria-label="S\xE9lectionner ${echapper(nom)}">` : ""}</div>
+      <div class="jr-score ${ton}" title="Score ${sc}/100"><b>${p.score ?? "\u2014"}</b><span>/100</span></div>
+      <div class="jr-corps">
+        <div class="jr-tete">
+          <a class="jr-nom" href="?cle=${cle}&page=radar&prospect=${p.id}">${echapper(nom)}</a>
+          ${p.domaine ? `<a class="jr-dom" href="https://${echapper(p.domaine)}" target="_blank" rel="noopener">${echapper(p.domaine)} \u2197</a>` : ""}
         </div>
-        <div class="meta">
-          ${p.email_contact ? `<span>\u2709\uFE0F <a href="mailto:${echapper(p.email_contact)}"><b>${echapper(p.email_contact)}</b></a></span>` : `<span class="sec">\u2709\uFE0F ${p.contacts_verifies_le ? "email introuvable sur le site" : "email en cours de recherche"}</span>`}
-          ${p.telephone ? `<span>${p.whatsapp ? "\u{1F4AC}" : "\u{1F4DE}"} <a href="https://wa.me/${echapper(String(p.telephone).replace(/\D/g, ""))}" target="_blank" rel="noopener"><b>${echapper(p.telephone)}</b></a>${p.whatsapp ? ` <span class="sec">WhatsApp</span>` : ""} <a class="sec" href="tel:${echapper(p.telephone)}">appeler</a></span>` : `<span class="sec">\u{1F4DE} ${p.contacts_verifies_le ? "num\xE9ro introuvable" : "num\xE9ro en cours de recherche"}</span>`}
-          ${p.instagram ? `<span>\u{1F4F8} <a href="https://www.instagram.com/${echapper(p.instagram)}/" target="_blank" rel="noopener"><b>@${echapper(p.instagram)}</b></a></span>` : `<span class="sec">\u{1F4F8} ${p.contacts_verifies_le ? "Instagram introuvable" : "Instagram en cours de recherche"}</span>`}
+        <div class="jr-tags">
+          ${p.shopify_statut === "oui" ? `<span class="jr-tag vert">Shopify</span>` : ""}
+          ${estWeb ? `<span class="jr-tag">${echapper(radarLibelleSource(p.source))}</span>` : `<span class="jr-tag">${p.pubs_actives ?? "?"} pubs actives</span>`}
+          ${!estWeb && jPub !== null ? `<span class="jr-tag">pub depuis ${jPub} j</span>` : ""}
+          ${p.categorie === "A" ? `<span class="jr-tag jaune">nouvelle acquisition</span>` : ""}
+          ${p.niche ? `<span class="jr-tag">${echapper(p.niche)}</span>` : ""}
+          ${p.pagespeed_score !== null && p.pagespeed_score !== void 0 ? `<span class="jr-tag${p.pagespeed_score < 40 ? " rouge" : ""}">PageSpeed ${p.pagespeed_score}</span>` : ""}
+        </div>
+        <div class="jr-contacts">
+          ${p.email_contact ? `<a class="jr-c ok" href="mailto:${echapper(p.email_contact)}">\u2709\uFE0F ${echapper(p.email_contact)}</a>` : `<span class="jr-c">\u2709\uFE0F email ${cherche}</span>`}
+          ${p.telephone ? `<a class="jr-c ok" href="https://wa.me/${echapper(tel)}" target="_blank" rel="noopener">${p.whatsapp ? "\u{1F4AC} WhatsApp" : "\u{1F4DE}"} ${echapper(p.telephone)}</a>` : `<span class="jr-c">\u{1F4DE} ${cherche}</span>`}
+          ${p.instagram ? `<a class="jr-c ok" href="https://www.instagram.com/${echapper(p.instagram)}/" target="_blank" rel="noopener">\u{1F4F8} @${echapper(p.instagram)}</a>` : `<span class="jr-c">\u{1F4F8} ${cherche}</span>`}
         </div>
         ${p.email_envoye_le ? `<div class="meta">${radarSuiviBadges(p)}</div>` : ""}
-        ${p.email_programme_le ? `<div class="meta"><span class="prio encours">\u23F3 envoi programm\xE9</span></div>` : ""}
-        ${p.email_erreur && !p.email_envoye_le ? `<div class="meta"><span class="retard">\u26A0\uFE0F envoi \xE9chou\xE9 : ${echapper(String(p.email_erreur).slice(0, 120))}</span></div>` : ""}
-        <details style="margin-top:8px"><summary>\u2709\uFE0F Contacter par email</summary>
-          <form class="f" method="POST" style="border:0;padding:8px 0 0;background:none"
-            action="?cle=${cle}&page=radar&prospect=${p.id}&action=radar_email">
-            <label class="large">Destinataire<input name="a" type="email" required value="${echapper(p.email_contact || "")}" placeholder="contact@boutique.com"></label>
-            <label class="large">Objet<input name="objet" required value="${echapper(radarModeleEmail(p, reg).objet)}"></label>
-            <label class="large">Message<textarea name="message" rows="14" required>${echapper(radarModeleEmail(p, reg).corps)}</textarea></label>
-            <a class="sec" href="?cle=${cle}&page=radar&vue=reglages#modele-email">Modifier le mod\xE8le d'email</a>
-            <button class="envoyer large" type="submit">Envoyer l'email</button>
-          </form>
-        </details>
-        <details style="margin-top:6px"><summary>\u274C \xC9carter ce prospect</summary>
-          <form class="f" method="POST" style="border:0;padding:8px 0 0;background:none"
-            action="?cle=${cle}&page=radar&prospect=${p.id}&action=radar_statut&statut=${encodeURIComponent("non pertinent")}">
-            <label class="large">Motif<select name="motif">${RADAR_MOTIFS.map((m) => `<option>${m}</option>`).join("")}</select></label>
-            <button class="envoyer large" type="submit" style="background:var(--rouge);color:#fff">\xC9carter</button>
-          </form>
-        </details>
+        ${p.email_programme_le ? `<div class="jr-etat">\u23F3 Envoi programm\xE9, il part dans quelques minutes</div>` : ""}
+        ${p.email_erreur && !p.email_envoye_le ? `<div class="jr-etat rouge">\u26A0\uFE0F Envoi \xE9chou\xE9 : ${echapper(String(p.email_erreur).slice(0, 120))}</div>` : ""}
+        <div class="jr-outils">
+          <details><summary>\u2709\uFE0F Contacter</summary>
+            <form class="f" method="POST" action="?cle=${cle}&page=radar&prospect=${p.id}&action=radar_email">
+              <label class="large">Destinataire<input name="a" type="email" required value="${echapper(p.email_contact || "")}" placeholder="contact@boutique.com"></label>
+              <label class="large">Objet<input name="objet" required value="${echapper(modele.objet)}"></label>
+              <label class="large">Message<textarea name="message" rows="12" required>${echapper(modele.corps)}</textarea></label>
+              <a class="sec" href="?cle=${cle}&page=radar&vue=reglages#modele-email">Modifier le mod\xE8le d'email</a>
+              <button class="envoyer large" type="submit">Envoyer l'email</button>
+            </form>
+          </details>
+          <details class="ecarter"><summary>\u274C \xC9carter</summary>
+            <form class="f" method="POST" action="?cle=${cle}&page=radar&prospect=${p.id}&action=radar_statut&statut=${encodeURIComponent("non pertinent")}">
+              <label class="large">Motif<select name="motif">${RADAR_MOTIFS.map((m) => `<option>${m}</option>`).join("")}</select></label>
+              <button class="envoyer large" type="submit" style="background:var(--rouge);color:#fff">\xC9carter ce prospect</button>
+            </form>
+          </details>
+          <a class="jr-lien" href="?cle=${cle}&page=radar&prospect=${p.id}">Voir l'analyse \u2192</a>
+        </div>
       </div>
-      <div class="outils">
-        ${p.domaine ? `<a class="bouton pale" href="https://${echapper(p.domaine)}" target="_blank" rel="noopener">Boutique</a>` : ""}
-        <a class="bouton pale" href="?cle=${cle}&page=radar&prospect=${p.id}">Ouvrir</a>
-      </div></div>`;
+    </article>`;
   }, "carte");
   const onglets = `<section><div class="actions">
       ${[["jour", "Prospects du jour"], ["a_contacter", `\xC0 contacter (${par["\xE0 contacter"] || 0})`], ["contactes", `Contact\xE9s (${(par["contact\xE9"] || 0) + (par["r\xE9pondu"] || 0) + (par["rdv"] || 0) + (par["client"] || 0)})`], ["ecartes", `Boutiques \xE9cart\xE9es (${(par["non pertinent"] || 0) + (par["d\xE9j\xE0 optimis\xE9"] || 0)})`]].map(([v, lib]) => `<a class="bouton${vue === v ? "" : " pale"}" href="?cle=${cle}&page=radar&vue=${v}">${lib}</a>`).join("")}
@@ -8291,7 +8360,8 @@ async function pageRadar(env, url, message) {
       return `${message || ""}${onglets}
         <section><h2>\xC0 contacter</h2>
           ${barreGroupe(liste)}
-          ${liste.length ? `<div class="taches">${liste.map(carte).join("")}</div>` : `<div class="tw"><div class="vide">Aucun prospect marqu\xE9 \xE0 contacter.</div></div>`}
+          ${RADAR_JR_CSS}
+          ${liste.length ? `<div class="jr-liste">${liste.map(carte).join("")}</div>` : `<div class="tw"><div class="vide">Aucun prospect marqu\xE9 \xE0 contacter.</div></div>`}
         </section>`;
     }
     if (vue === "contactes") return `${message || ""}${onglets}${radarVueContactes(liste, cle)}`;
@@ -8317,43 +8387,29 @@ async function pageRadar(env, url, message) {
     ${onglets}
     ${sansJeton || !sourceDisponible ? installation : ""}
 
-    <section><div class="grille">
-      ${carteHtml(
-    "Propos\xE9s aujourd'hui",
-    String(prospects.length),
-    `sur ${reg.parJour} demand\xE9s`,
-    prospects.length ? "bon" : "neutre"
-  )}
-      ${carteHtml(
-    "\xC0 contacter",
-    String(par["\xE0 contacter"] || 0),
-    "valid\xE9s par vous",
-    par["\xE0 contacter"] ? "moyen" : "neutre"
-  )}
-      ${carteHtml("Contact\xE9s", String(par["contact\xE9"] || 0), `${par["rdv"] || 0} rendez-vous obtenu(s)`)}
-      ${carteHtml("Base totale", String(totalProspects), "annonceurs connus du radar")}
-      ${carteHtml(
-    "Collecteur Radar",
-    env.META_TOKEN ? "Meta + recherche web" : env.GEMINI_API_KEY ? "Gemini + recherche web" : "Recherche web",
-    executionRadar ? `${executionRadar.statut} \xB7 ${depuis(executionRadar.quand)}` : "aucune collecte ex\xE9cut\xE9e",
-    !sourceDisponible || executionRadar?.statut === "erreur" ? "mauvais" : "bon"
-  )}
-      ${carteHtml("Domaines \xE0 r\xE9soudre", String(nonResolus), "annonceurs d\xE9tect\xE9s sans boutique confirm\xE9e")}
-    </div></section>
-
-    <section><div class="actions">
-      <a class="bouton pale" href="?cle=${cle}&page=radar&vue=reglages">\u2699 Mots-cl\xE9s et r\xE9glages</a>
-      <a class="bouton pale" href="?cle=${cle}&page=radar&vue=reglages#modele-email">\u270F\uFE0F Mod\xE8le d'email</a>
-      ${sourceDisponible ? `<form method="POST" action="?cle=${cle}&page=radar&action=radar_collecter" style="display:inline">
-        <button class="envoyer" type="submit">Lancer une collecte maintenant</button></form>` : ""}
-      <span class="sec">${motscles.filter((m) => m.actif).length} mots-cl\xE9s actifs \xB7 pays ${echapper(reg.pays)}</span>
-    </div></section>
+    ${RADAR_JR_CSS}
+    <section>
+      <div class="ct-kpi">
+        <div><b>${prospects.length}<em>/ ${reg.parJour}</em></b><span>prospects propos\xE9s aujourd'hui</span></div>
+        <div><b>${prospects.filter((p) => p.email_contact).length}</b><span>avec un email trouv\xE9</span></div>
+        <div><b>${par["\xE0 contacter"] || 0}</b><span>\xE0 contacter</span></div>
+        <div><b>${(par["contact\xE9"] || 0) + (par["r\xE9pondu"] || 0) + (par["rdv"] || 0) + (par["client"] || 0)}</b><span>contact\xE9s \xB7 ${par["rdv"] || 0} RDV</span></div>
+      </div>
+      <div class="jr-radar">
+        <span class="jr-point ${!sourceDisponible || executionRadar?.statut === "erreur" ? "rouge" : "vert"}"></span>
+        <span>Collecteur ${env.META_TOKEN ? "Meta + recherche web" : env.GEMINI_API_KEY ? "Gemini + recherche web" : "recherche web"} \xB7 ${executionRadar ? `derni\xE8re collecte ${depuis(executionRadar.quand)}` : "aucune collecte ex\xE9cut\xE9e"} \xB7 ${totalProspects} boutiques en base${nonResolus ? ` \xB7 ${nonResolus} domaines \xE0 r\xE9soudre` : ""} \xB7 ${motscles.filter((m) => m.actif).length} mots-cl\xE9s actifs</span>
+        <span class="jr-radar-actions">
+          <a href="?cle=${cle}&page=radar&vue=reglages">\u2699 R\xE9glages</a>
+          <a href="?cle=${cle}&page=radar&vue=reglages#modele-email">\u270F\uFE0F Mod\xE8le d'email</a>
+          ${sourceDisponible ? `<form method="POST" action="?cle=${cle}&page=radar&action=radar_collecter"><button type="submit">\u21BB Lancer une collecte</button></form>` : ""}
+        </span>
+      </div>
+    </section>
 
     <section><h2>Prospects du jour</h2>
-      <p class="sec" style="margin:-4px 0 0">${reg.parJour} opportunit\xE9s s\xE9lectionn\xE9es automatiquement.
-        Vous v\xE9rifiez, vous d\xE9cidez \u2014 rien ne part sans vous.</p>
+      <p class="jr-intro">Class\xE9s du meilleur score au plus faible. Vous v\xE9rifiez, vous d\xE9cidez : rien ne part sans vous.</p>
       ${barreGroupe(prospects)}
-      ${prospects.length ? `<div class="taches">${prospects.map(carte).join("")}</div>` : `<div class="tw"><div class="vide">${sourceDisponible ? "Aucun prospect qualifi\xE9 pour le moment. La prochaine collecte continuera la recherche." : "Le collecteur attend une connexion Gemini ou Meta."}</div></div>`}
+      ${prospects.length ? `<div class="jr-liste">${[...prospects].sort((a, b) => (b.score ?? 0) - (a.score ?? 0)).map(carte).join("")}</div>` : `<div class="tw"><div class="vide">${sourceDisponible ? "Aucun prospect qualifi\xE9 pour le moment. La prochaine collecte continuera la recherche." : "Le collecteur attend une connexion Gemini ou Meta."}</div></div>`}
     </section>
 
     <div class="note"><b>Pas plus de prospects. De meilleurs prospects.</b>
