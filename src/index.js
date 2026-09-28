@@ -7891,7 +7891,8 @@ var RADAR_JR_CSS = `<style>
 .jr-outils details summary{display:inline-flex}
 .jr-outils summary{list-style:none;cursor:pointer;font-size:13px;font-weight:500;padding:6px 12px;border-radius:8px;border:1px solid var(--trait-fort);background:var(--surface);user-select:none}
 .jr-outils summary::-webkit-details-marker{display:none}
-.jr-outils summary:hover{background:var(--surface3)}
+.jr-outils summary:hover,.jr-btn:hover{background:var(--surface3)}
+.jr-btn{font-size:13px;font-weight:500;padding:6px 12px;border-radius:8px;border:1px solid var(--trait-fort);background:var(--surface);color:var(--encre);text-decoration:none;white-space:nowrap}
 .jr-outils details[open] summary{background:var(--encre);color:var(--fond);border-color:var(--encre)}
 .jr-outils details.ecarter summary{color:var(--rouge)}
 .jr-outils details.ecarter[open] summary{background:var(--rouge);border-color:var(--rouge);color:#fff}
@@ -8339,6 +8340,8 @@ async function pageRadar(env, url, message) {
               <button class="envoyer large" type="submit" style="background:var(--rouge);color:#fff">\xC9carter ce prospect</button>
             </form>
           </details>
+          ${p.domaine ? `<a class="jr-btn" href="https://${echapper(p.domaine)}" target="_blank" rel="noopener">\u{1F310} Voir la boutique</a>` : ""}
+          <a class="jr-btn" target="_blank" rel="noopener" href="https://www.facebook.com/ads/library/?active_status=active&ad_type=all&country=${echapper(reg.pays || "FR")}&${!estWeb && p.page_id ? `view_all_page_id=${echapper(p.page_id)}` : `q=${encodeURIComponent(p.domaine || nom)}&search_type=keyword_unordered`}">\u{1F4E2} Voir les pubs</a>
           <a class="jr-lien" href="?cle=${cle}&page=radar&prospect=${p.id}">Voir l'analyse \u2192</a>
         </div>
       </div>
