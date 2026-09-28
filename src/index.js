@@ -6523,6 +6523,64 @@ function radarEvaluerMarche(html, domaine, pays) {
 }
 __name(radarEvaluerMarche, "radarEvaluerMarche");
 __name2(radarEvaluerMarche, "radarEvaluerMarche");
+var RADAR_MOTS_FR = /\b(le|la|les|des|du|une|et|pour|avec|vous|votre|vos|nos|notre|sur|dans|livraison|panier|commande|ajouter|produits?|gratuite?|nouveautés|découvrir|acheter)\b/gi;
+var RADAR_MOTS_EN = /\b(the|and|for|with|you|your|our|shop|shipping|cart|free|add|new|arrivals|discover|buy|now|best|sellers?|order|products?)\b/gi;
+var RADAR_OUTILS_PRO = [
+  ["Klaviyo", /klaviyo/i],
+  ["Rebuy", /rebuyengine|rebuy\.io/i],
+  ["Abonnements", /rechargecdn|rechargepayments|skio\.com|loopsubscriptions|stay\.ai/i],
+  ["Gorgias", /gorgias/i],
+  ["Avis premium", /okendo|yotpo|stamped\.io|reviews\.io|trustpilot\.com\/.*widget/i],
+  ["SMS marketing", /attentivemobile|postscript\.io|smsbump/i],
+  ["Analytics pro", /triplewhale|triple-whale|northbeam|elevar/i]
+];
+var RADAR_AB_TEST = /intelligems|shoplift|visualwebsiteoptimizer|\bvwo\b|convert\.com\/js|abtasty|kameleoon|optimizely|dynamicyield/i;
+var RADAR_THEMES_COURANTS = /^(shrine|booster|debutify|kalles|minimog|wokiee|ella|shella|electro|turbo|flex|dropshipping|ecomus|eurus)/i;
+function radarEvaluerQualite(html, pubsActives, avis, pays) {
+  const brut = String(html || "");
+  const langAttr = (brut.match(/<html[^>]*\slang=["']?([a-z]{2})/i) || [])[1]?.toLowerCase() || null;
+  const texte = brut.replace(/<script[\s\S]*?<\/script>/gi, " ").replace(/<style[\s\S]*?<\/style>/gi, " ").replace(/<[^>]+>/g, " ").slice(0, 2e5);
+  const fr = (texte.match(RADAR_MOTS_FR) || []).length;
+  const en = (texte.match(RADAR_MOTS_EN) || []).length;
+  let langue = langAttr;
+  if (fr + en >= 12) langue = fr >= en * 0.6 ? "fr" : en >= fr * 1.5 ? "en" : langAttr || "fr";
+  else if (!langue) langue = fr >= en ? "fr" : "en";
+  let theme = null, themeStoreId = null;
+  const m = brut.match(/Shopify\.theme\s*=\s*(\{[^;<]{0,800}?\})\s*;/);
+  if (m) {
+    try {
+      const t = JSON.parse(m[1]);
+      theme = String(t.schema_name || t.name || "").slice(0, 60) || null;
+      themeStoreId = t.theme_store_id ?? null;
+    } catch {
+      theme = (m[1].match(/"(?:schema_name|name)"\s*:\s*"([^"]{1,60})"/) || [])[1] || null;
+      themeStoreId = /"theme_store_id"\s*:\s*\d+/.test(m[1]) ? 1 : null;
+    }
+  }
+  const themePerso = Boolean(m) && themeStoreId === null && !RADAR_THEMES_COURANTS.test(theme || "");
+  const cro = radarSignauxCro(brut);
+  const croNiveau = ["avis", "sticky_atc", "faq", "livraison", "retour", "reassurance", "bundles", "video"].filter((k) => cro[k]).length;
+  const outils = RADAR_OUTILS_PRO.filter(([, re]) => re.test(brut)).map(([nom]) => nom);
+  const abTest = RADAR_AB_TEST.test(brut);
+  const pubs = Number(pubsActives || 0), nbAvis = Number(avis || 0);
+  let exclusion = null;
+  if ((pays || "FR") === "FR" && langue !== "fr") exclusion = { statut: "non pertinent", motif: "auto : boutique pas en français" };
+  else if (nbAvis >= 5e3 || pubs >= 150) exclusion = { statut: "non pertinent", motif: "auto : marque trop importante" };
+  else if (abTest || croNiveau >= 6 && outils.length >= 3 || croNiveau >= 5 && themePerso && outils.length >= 2)
+    exclusion = { statut: "déjà optimisé", motif: "auto : boutique déjà très optimisée" + (abTest ? " (tests A/B)" : "") };
+  return { langue, theme, themePerso, croNiveau, outils, abTest, exclusion };
+}
+__name(radarEvaluerQualite, "radarEvaluerQualite");
+__name2(radarEvaluerQualite, "radarEvaluerQualite");
+async function radarEnregistrerQualite(db, prospect, q) {
+  const maintenant = (/* @__PURE__ */ new Date()).toISOString();
+  await db.prepare("UPDATE radar_prospects SET langue=?, theme_nom=?, theme_perso=?, outils_pro=?, qualite_exclusion=?, qualite_verifiee_le=? WHERE id=?").bind(q.langue, q.theme, q.themePerso ? 1 : 0, q.outils.join(", ") || null, q.exclusion?.motif || null, maintenant, prospect.id).run();
+  if (!q.exclusion || !prospect.presente_le || !["nouveau", "à vérifier", "à contacter"].includes(prospect.statut)) return;
+  await db.prepare("UPDATE radar_prospects SET statut=?, motif_rejet=?, email_programme_le=NULL WHERE id=?").bind(q.exclusion.statut, q.exclusion.motif, prospect.id).run();
+  await db.prepare(`INSERT INTO radar_historique (prospect_id, ancien_statut, nouveau_statut, motif, quand) VALUES (?, ?, ?, ?, ?)`).bind(prospect.id, prospect.statut, q.exclusion.statut, q.exclusion.motif, maintenant).run();
+}
+__name(radarEnregistrerQualite, "radarEnregistrerQualite");
+__name2(radarEnregistrerQualite, "radarEnregistrerQualite");
 function radarEvaluerPertinence(html, mot, niche) {
   const texte = radarSansAccents(String(html || "").replace(/<script[\s\S]*?<\/script>/gi, " ").replace(/<style[\s\S]*?<\/style>/gi, " ").replace(/<[^>]+>/g, " "));
   const expression = radarSansAccents(mot).trim();
@@ -6673,13 +6731,21 @@ async function assurerRadarSchema(db) {
     ["email_clique_le", "TEXT"],
     ["email_clics", "INTEGER NOT NULL DEFAULT 0"],
     ["email_programme_le", "TEXT"],
-    ["email_erreur", "TEXT"]
+    ["email_erreur", "TEXT"],
+    ["langue", "TEXT"],
+    ["theme_nom", "TEXT"],
+    ["theme_perso", "INTEGER"],
+    ["outils_pro", "TEXT"],
+    ["qualite_exclusion", "TEXT"],
+    ["qualite_verifiee_le", "TEXT"]
   ];
   for (const [nom, type] of ajouts) {
     if (!colonnes.has(nom)) await db.prepare(`ALTER TABLE radar_prospects ADD COLUMN ${nom} ${type}`).run();
   }
   await db.prepare("CREATE INDEX IF NOT EXISTS idx_radar_prospects_score ON radar_prospects(statut,score DESC)").run();
   await db.prepare("CREATE INDEX IF NOT EXISTS idx_radar_prospects_suivi ON radar_prospects(suivi_jeton)").run();
+  await db.prepare("CREATE INDEX IF NOT EXISTS idx_radar_prospects_presente ON radar_prospects(presente_le)").run();
+  await db.prepare("CREATE INDEX IF NOT EXISTS idx_radar_prospects_programme ON radar_prospects(email_programme_le)").run();
   await db.prepare("CREATE INDEX IF NOT EXISTS idx_radar_pubs_page ON radar_pubs(page_id,active)").run();
   await db.prepare("CREATE INDEX IF NOT EXISTS idx_radar_motscles_passage ON radar_motscles(actif,dernier_passage)").run();
 }
@@ -7426,7 +7492,8 @@ async function radarAnalyserAnnonceur(env, annonceur, reg) {
     const activiteValide = sourceWeb || annonceur.pubsActives >= reg.pubsMin && (joursPub === null || joursPub >= reg.pubAncienneteMin);
     const marcheValide = !sourceWeb || marche.statut === "oui";
     const nicheValide = !sourceWeb || pertinence.confiance >= 60;
-    const qualifie = resultatScore.score >= reg.scoreMin && activiteValide && marcheValide && nicheValide && (!reg.shopifyObligatoire || shopify2.statut === "oui");
+    const qualite = radarEvaluerQualite(site.html, annonceur.pubsActives, temporaire.nombre_avis, reg.pays);
+    const qualifie = !qualite.exclusion && resultatScore.score >= reg.scoreMin && activiteValide && marcheValide && nicheValide && (!reg.shopifyObligatoire || shopify2.statut === "oui");
     await db.prepare(`INSERT INTO radar_prospects
       (page_id,source,source_url,marque,domaine,domaine_confiance,domaine_methode,domaine_cree_le,registrar,pays,
        marche_statut,marche_confiance,marche_preuves,niche,pertinence_niche,categorie,
@@ -7482,7 +7549,8 @@ async function radarAnalyserAnnonceur(env, annonceur, reg) {
       annonceur.portee || null,
       technos.filter((t) => t.detecte).length
     ).run();
-    const prospect = await db.prepare("SELECT id FROM radar_prospects WHERE page_id=?").bind(annonceur.pageId).first();
+    const prospect = await db.prepare("SELECT id, statut, presente_le FROM radar_prospects WHERE page_id=?").bind(annonceur.pageId).first();
+    if (prospect?.id) await radarEnregistrerQualite(db, prospect, qualite);
     if (prospect?.id && qualifie) await radarEnregistrerContacts(db, prospect.id, annonceur.domaine, site.html);
     if (prospect?.id) {
       for (const techno of technos) {
@@ -7677,7 +7745,7 @@ async function radarCompleterJour(db, reg) {
   const r = await db.prepare(`UPDATE radar_prospects SET presente_le=? WHERE id IN (
       SELECT id FROM radar_prospects
       WHERE presente_le IS NULL AND statut='nouveau' AND etape='analyse' AND score>=?
-        AND julianday('now')-julianday(cree_le)<=7
+        AND qualite_verifiee_le IS NOT NULL AND qualite_exclusion IS NULL AND julianday('now')-julianday(cree_le)<=7
         AND (source IN ('google_gemini','web_brave','common_crawl') OR (COALESCE(source,'meta')='meta' AND pubs_actives>=?
           AND (premiere_pub_vue IS NULL OR julianday('now')-julianday(premiere_pub_vue)>=?)))
         AND (?=0 OR shopify_statut='oui')
@@ -7775,6 +7843,35 @@ async function radarContactsEnAttente(env) {
     for (const p of file?.results || []) await radarEnregistrerContacts(env.DB, p.id, p.domaine);
   } catch (e) {
     console.error("recherche contacts", e?.message || e);
+  }
+}
+var RADAR_QUALITE_PAR_MINUTE = 2;
+async function radarQualiteEnAttente(env) {
+  try {
+    const fini = await env.DB.prepare("SELECT valeur FROM radar_reglages WHERE cle='qualite_rattrapage'").first().catch(() => null);
+    if (fini?.valeur === "1") return;
+    const file = await env.DB.prepare(`SELECT id, statut, domaine, pubs_actives, presente_le FROM radar_prospects
+      WHERE qualite_verifiee_le IS NULL AND domaine IS NOT NULL AND etape='analyse'
+        AND (statut IN ('\xE0 v\xE9rifier','\xE0 contacter') OR statut='nouveau' AND (presente_le IS NOT NULL OR julianday('now')-julianday(cree_le)<=7))
+      ORDER BY presente_le IS NULL, presente_le DESC, score DESC LIMIT ?`).bind(RADAR_QUALITE_PAR_MINUTE).all();
+    const liste = file?.results || [];
+    if (!liste.length) {
+      await env.DB.prepare("INSERT INTO radar_reglages (cle, valeur, maj_le) VALUES ('qualite_rattrapage', '1', ?) ON CONFLICT(cle) DO UPDATE SET valeur='1', maj_le=excluded.maj_le").bind((/* @__PURE__ */ new Date()).toISOString()).run();
+      return;
+    }
+    const pays = (await env.DB.prepare("SELECT valeur FROM radar_reglages WHERE cle='pays'").first().catch(() => null))?.valeur || "FR";
+    for (const p of liste) {
+      let html;
+      try {
+        html = (await radarChargerSite(p.domaine)).html;
+      } catch (e) {
+        await env.DB.prepare("UPDATE radar_prospects SET qualite_verifiee_le=? WHERE id=?").bind((/* @__PURE__ */ new Date()).toISOString(), p.id).run();
+        continue;
+      }
+      await radarEnregistrerQualite(env.DB, p, radarEvaluerQualite(html, p.pubs_actives, radarNombreAvis(html), pays));
+    }
+  } catch (e) {
+    console.error("v\xE9rification qualit\xE9", e?.message || e);
   }
 }
 var RADAR_ENVOIS_PAR_MINUTE = 5;
@@ -8057,7 +8154,7 @@ async function pageRadar(env, url, message) {
   const reg = await radarReglages(env.DB);
   const vue = url.searchParams.get("vue") || "jour";
   const id = url.searchParams.get("prospect");
-  const [motscles, compteurs, prospects, executionsRadar, annonceursNonResolus] = await Promise.all([
+  const [motscles, compteurs, prospects, executionsRadar] = await Promise.all([
     tous2(env.DB, "SELECT * FROM radar_motscles ORDER BY niche, mot"),
     tous2(env.DB, "SELECT statut, COUNT(*) AS n FROM radar_prospects GROUP BY statut"),
     tous2(
@@ -8070,11 +8167,9 @@ async function pageRadar(env, url, message) {
       reg.shopifyObligatoire ? 1 : 0,
       reg.parJour
     ),
-    tous2(env.DB, "SELECT quand,statut,message,duree_ms FROM executions WHERE domaine='radar' ORDER BY quand DESC LIMIT 1"),
-    tous2(env.DB, "SELECT COUNT(*) AS n FROM radar_annonceurs a WHERE NOT EXISTS (SELECT 1 FROM radar_prospects p WHERE p.page_id=a.page_id)")
+    tous2(env.DB, "SELECT quand,statut,message,duree_ms FROM executions WHERE domaine='radar' ORDER BY quand DESC LIMIT 1")
   ]);
   const executionRadar = executionsRadar[0] || null;
-  const nonResolus = Number(annonceursNonResolus[0]?.n || 0);
   const par = {};
   for (const c of compteurs) par[c.statut] = c.n;
   const totalProspects = compteurs.reduce((t, c) => t + c.n, 0);
@@ -8431,7 +8526,7 @@ async function pageRadar(env, url, message) {
       </div>
       <div class="jr-radar">
         <span class="jr-point ${!sourceDisponible || executionRadar?.statut === "erreur" ? "rouge" : "vert"}"></span>
-        <span>Collecteur ${env.META_TOKEN ? "Meta + recherche web" : env.GEMINI_API_KEY ? "Gemini + recherche web" : "recherche web"} \xB7 ${executionRadar ? `derni\xE8re collecte ${depuis(executionRadar.quand)}` : "aucune collecte ex\xE9cut\xE9e"} \xB7 ${totalProspects} boutiques en base${nonResolus ? ` \xB7 ${nonResolus} domaines \xE0 r\xE9soudre` : ""} \xB7 ${motscles.filter((m) => m.actif).length} mots-cl\xE9s actifs</span>
+        <span>Collecteur ${env.META_TOKEN ? "Meta + recherche web" : env.GEMINI_API_KEY ? "Gemini + recherche web" : "recherche web"} \xB7 ${executionRadar ? `derni\xE8re collecte ${depuis(executionRadar.quand)}` : "aucune collecte ex\xE9cut\xE9e"} \xB7 ${totalProspects} boutiques en base \xB7 ${motscles.filter((m) => m.actif).length} mots-cl\xE9s actifs</span>
         <span class="jr-radar-actions">
           <a href="?cle=${cle}&page=radar&vue=reglages">\u2699 R\xE9glages</a>
           <a href="?cle=${cle}&page=radar&vue=reglages#modele-email">\u270F\uFE0F Mod\xE8le d'email</a>
@@ -9614,7 +9709,7 @@ var index_default = {
         lancer("radar", executerRadar, env)
       ]));
     } else {
-      ctx.waitUntil(Promise.all([lancer("calendly", executer, env), smtpTestEnAttente(env), radarEnvoisProgrammes(env), radarContactsEnAttente(env)]));
+      ctx.waitUntil(Promise.all([lancer("calendly", executer, env), smtpTestEnAttente(env), radarEnvoisProgrammes(env), radarContactsEnAttente(env), radarQualiteEnAttente(env)]));
     }
   },
   // Déclenchement manuel, pratique pour tester sans attendre la planification.
