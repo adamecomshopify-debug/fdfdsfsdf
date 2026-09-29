@@ -1987,7 +1987,7 @@ function clausesParDefaut(d) {
   const articles = [
     ["OBJET", `Le pr\xE9sent contrat d\xE9finit les conditions dans lesquelles le Prestataire r\xE9alise pour le Client la prestation \xAB ${d.titre} \xBB, d\xE9crite ci-dessus et dans le devis n\xB0 ${numeroDevis(d)} du ${dateFr(d.date_devis)}, qui fait partie int\xE9grante du contrat.`],
     ["D\xC9LAI DE R\xC9ALISATION", `La prestation sera livr\xE9e dans un d\xE9lai de ${d.delai_livraison} \xE0 compter de la r\xE9ception de l'acompte et de l'ensemble des \xE9l\xE9ments n\xE9cessaires fournis par le Client (acc\xE8s, contenus, visuels). Tout retard dans la transmission de ces \xE9l\xE9ments d\xE9cale d'autant la date de livraison.`],
-    ["PRIX ET MODALIT\xC9S DE PAIEMENT", `Le prix total de la prestation est de ${euros(d.montant)} TTC (TVA non applicable, article 293 B du CGI). ${modalitesDevis(d)} Les paiements s'effectuent par virement bancaire. En cas de retard de paiement, des p\xE9nalit\xE9s au taux de trois fois le taux d'int\xE9r\xEAt l\xE9gal ainsi qu'une indemnit\xE9 forfaitaire de 40 € pour frais de recouvrement sont exigibles.`],
+    ["PRIX ET MODALIT\xC9S DE PAIEMENT", `Le prix total de la prestation est de ${euros(d.montant)} TTC (TVA non applicable, article 293 B du CGI). ${modalitesDevis(d)} Les paiements s'effectuent par virement bancaire.`],
     ["OBLIGATIONS DU CLIENT", `Le Client s'engage \xE0 fournir au Prestataire les acc\xE8s, informations et contenus n\xE9cessaires, \xE0 r\xE9pondre dans des d\xE9lais raisonnables aux demandes de validation, et \xE0 r\xE9gler les sommes dues aux \xE9ch\xE9ances pr\xE9vues.`],
     ["OBLIGATIONS DU PRESTATAIRE", `Le Prestataire s'engage \xE0 r\xE9aliser la prestation avec soin et selon les r\xE8gles de l'art, et \xE0 tenir le Client inform\xE9 de son avancement. Il est tenu \xE0 une obligation de moyens.`],
     ["DEMANDES SUPPL\xC9MENTAIRES", `Toute demande ne figurant pas dans le devis fera l'objet d'un devis compl\xE9mentaire, soumis \xE0 l'accord du Client avant r\xE9alisation.`],
@@ -2010,7 +2010,7 @@ async function creerContrat(env, numero) {
   if (!d) return { erreur: "Devis introuvable." };
   if (await lireContrat(env.DB, numero)) return { ok: true };
   const p = env._profil || {};
-  await env.DB.prepare(`INSERT INTO contrats (devis_numero, jeton, clauses, presta_nom, cree_le) VALUES (?, ?, ?, ?, ?)`).bind(numero, nouveauJeton(), clausesParDefaut(d), p.banque_titulaire || p.profil_nom || "AdamEcom", (/* @__PURE__ */ new Date()).toISOString()).run();
+  await env.DB.prepare(`INSERT INTO contrats (devis_numero, jeton, clauses, presta_nom, cree_le) VALUES (?, ?, ?, ?, ?)`).bind(numero, nouveauJeton(), clausesParDefaut(d), p.profil_nom || "AdamEcom", (/* @__PURE__ */ new Date()).toISOString()).run();
   return { ok: true };
 }
 __name22(creerContrat, "creerContrat");
@@ -2283,7 +2283,7 @@ ${opts.merci ? `<div class="ok" style="margin-top:28px">Merci, votre signature e
       <div class="corps">
         <span class="nom">${echapper(p.profil_nom || "AdamEcom")}</span><br>
         ${p.profil_activite ? `${echapper(p.profil_activite)}<br>` : ""}
-        ${c.presta_nom ? `<span class="eti">Repr\xE9sent\xE9 par</span> ${echapper(c.presta_nom)}<br>` : ""}
+        ${c.presta_nom && c.presta_nom !== (p.profil_nom || "AdamEcom") ? `<span class="eti">Repr\xE9sent\xE9 par</span> ${echapper(c.presta_nom)}<br>` : ""}
         ${p.profil_email ? `<span class="eti">Email</span> ${echapper(p.profil_email)}<br>` : ""}
         ${p.profil_telephone ? `<span class="eti">T\xE9l.</span> ${echapper(p.profil_telephone)}<br>` : ""}
         ${p.profil_site ? `<span class="eti">Site</span> ${echapper(p.profil_site)}` : ""}
