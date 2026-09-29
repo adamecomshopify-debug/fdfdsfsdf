@@ -1690,6 +1690,10 @@ function gabaritDevis(d, env) {
   .barre{position:fixed;top:14px;right:14px;display:flex;gap:8px}
   .barre button{background:${JAUNE};color:${NOIR};font:700 14px/1 inherit;border:0;
     padding:12px 20px;border-radius:8px;cursor:pointer}
+  .barre button.sec{background:#fff;border:1px solid ${TRAIT}}
+  body.pdf{background:#fff}
+  body.pdf .barre,body.pdf .eq1,body.pdf .eq2,body.pdf .eq3,body.pdf .eq4{display:none}
+  body.pdf .feuille{margin:0 auto;box-shadow:none;width:794px;max-width:none;padding:0 56px}
 
   @media(max-width:760px){
     body{font-size:14px}
@@ -1714,11 +1718,11 @@ function gabaritDevis(d, env) {
     .infos,.totaux,.conditions,ul.inclus li{break-inside:avoid}
   }
 </style></head><body>
-<div class="barre"><button onclick="window.print()">Imprimer / enregistrer en PDF</button></div>
+<div class="barre"><button onclick="telechargerPdf()">T\xE9l\xE9charger le PDF</button><button class="sec" onclick="window.print()">Imprimer</button></div>
 <div class="feuille">
   <div class="eq1"></div><div class="eq2"></div><div class="eq3"></div><div class="eq4"></div>
 
-  <div class="logo"><img src="${echapper(p.profil_logo || LOGO)}" alt="${echapper(p.profil_nom || "AdamEcom")}"></div>
+  <div class="logo"><img src="${echapper(/^https?:/.test(p.profil_logo || LOGO) ? "/logo-devis" : p.profil_logo)}" alt="${echapper(p.profil_nom || "AdamEcom")}"></div>
 
   <div class="parties">
     <div class="partie">
@@ -1771,7 +1775,24 @@ function gabaritDevis(d, env) {
     Devis n\xB0 ${num} \xB7 ${echapper(p.profil_nom || "AdamEcom")}${p.profil_site ? ` \xB7 ${echapper(p.profil_site)}` : ""}<br>
     ${echapper(p.profil_mentions || "TVA non applicable \u2014 article 293 B du CGI. Paiement par virement bancaire.")}
   </div>
-</div></body></html>`;
+</div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js"><\/script>
+<script>
+function telechargerPdf(){
+  if(!window.html2pdf){ window.print(); return; }
+  document.body.classList.add('pdf');
+  return html2pdf().set({
+    margin:[12,0,12,0], filename:'Devis-${num}.pdf',
+    image:{type:'jpeg',quality:0.97},
+    html2canvas:{scale:2,useCORS:true,backgroundColor:'#ffffff'},
+    jsPDF:{unit:'mm',format:'a4',orientation:'portrait'},
+    pagebreak:{mode:['css','legacy'],avoid:['.infos','.totaux','.conditions','li','.intertitre']}
+  }).from(document.querySelector('.feuille')).save().then(function(){ document.body.classList.remove('pdf'); });
+}
+if(/[?&]telecharger=1/.test(location.search)){
+  window.addEventListener('load', function(){ setTimeout(telechargerPdf, 300); });
+}
+<\/script></body></html>`;
 }
 __name22(gabaritDevis, "gabaritDevis");
 var lireDevis = /* @__PURE__ */ __name22((db, numero) => db.prepare("SELECT * FROM devis WHERE numero = ?").bind(numero).first(), "lireDevis");
@@ -6605,7 +6626,8 @@ async function pageDevis(env, url, message) {
             onclick="return confirm('Envoyer le devis n\xB0 ${num} \xE0 ${echapperJs(d.client_email)} ?')">
             ${ic("envoi")} ${d.envoye_le ? "Renvoyer \xE0" : "Envoyer \xE0"} ${echapper(d.client_email)}</button>
         </form>
-        <a class="bouton" href="${lien}" target="_blank" rel="noopener">Ouvrir / t\xE9l\xE9charger en PDF</a>
+        <a class="bouton" href="${lien}?telecharger=1" target="_blank" rel="noopener">T\xE9l\xE9charger le PDF</a>
+        <a class="bouton" href="${lien}" target="_blank" rel="noopener">Ouvrir / imprimer</a>
         <a class="bouton" style="padding:13px 24px;font-size:14px"
           href="?cle=${cle}&page=devis&numero=${d.numero}&edit=1">${ic("crayon")} Modifier</a>
         <a class="bouton" href="?cle=${cle}&page=devis">Retour aux devis</a>
@@ -6643,7 +6665,7 @@ async function pageDevis(env, url, message) {
       <td class="nowrap"><div style="display:flex;gap:6px;flex-wrap:wrap">
         <a class="bouton pale" href="?cle=${cle}&page=devis&numero=${d.numero}">Ouvrir</a>
         <a class="bouton pale" href="?cle=${cle}&page=devis&numero=${d.numero}&edit=1">${ic("crayon")} Modifier</a>
-        <a class="bouton pale" href="/d/${echapper(d.jeton)}" target="_blank" rel="noopener">PDF</a>
+        <a class="bouton pale" href="/d/${echapper(d.jeton)}?telecharger=1" target="_blank" rel="noopener">PDF</a>
         <form method="POST" action="?cle=${cle}&page=devis&numero=${d.numero}&action=supprimer_devis" style="display:inline;margin:0">
           <button class="bouton pale" type="submit" style="color:var(--rouge);cursor:pointer"
             onclick="return confirm('Supprimer d\xE9finitivement le devis n\xB0 ${numeroDevis(d)} ?')">Supprimer</button></form>
@@ -10361,6 +10383,15 @@ var index_default = {
       await chargerProfil(env);
       return new Response(gabaritFacture(f, env), {
         headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" }
+      });
+    }
+    if (url.pathname === "/logo-devis") {
+      const p = await chargerProfil(env);
+      const src = /^https?:/.test(p.profil_logo || "") ? p.profil_logo : LOGO;
+      const r = await fetch(src);
+      if (!r.ok) return new Response("Logo introuvable", { status: 404 });
+      return new Response(r.body, {
+        headers: { "content-type": r.headers.get("content-type") || "image/png", "cache-control": "public, max-age=86400" }
       });
     }
     if (url.pathname.startsWith("/d/")) {
