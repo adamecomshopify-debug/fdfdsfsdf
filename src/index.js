@@ -6619,13 +6619,11 @@ async function pageDevis(env, url, message) {
           <button class="envoyer" type="submit" style="background:var(--encre);color:var(--fond)"
             onclick="return confirm('Cr\xE9er une facture (brouillon) de ${euros3(d.montant)} \xE0 partir de ce devis ?')">
             Transformer en facture</button></form>
+        <form method="POST" action="?cle=${cle}&page=devis&numero=${d.numero}&action=supprimer_devis" style="display:inline">
+          <button class="envoyer" type="submit" style="background:var(--rouge);color:#fff"
+            onclick="return confirm('Supprimer d\xE9finitivement le devis n\xB0 ${num} ?')">Supprimer</button></form>
       </div>
-      <details style="margin-top:16px"><summary>Supprimer ce devis</summary>
-        <div class="dedans">
-          <form method="POST" action="?cle=${cle}&page=devis&numero=${d.numero}&action=supprimer_devis" style="display:inline">
-            <button class="envoyer" type="submit" style="background:var(--rouge);color:#fff"
-              onclick="return confirm('Supprimer d\xE9finitivement le devis n\xB0 ${num} ?')">Supprimer</button></form>
-        </div></details>`}
+`}
       </section>
 
       <section><h2>Aper\xE7u</h2>
@@ -6633,7 +6631,7 @@ async function pageDevis(env, url, message) {
       </section>`;
   }
   const { results: tousDevis = [] } = await env.DB.prepare(`SELECT numero, date_devis, validite_jours, client_nom, client_societe, client_email,
-      titre, montant, statut, facture_numero FROM devis ORDER BY numero DESC LIMIT 100`).all();
+      titre, montant, statut, facture_numero, jeton FROM devis ORDER BY numero DESC LIMIT 100`).all();
   const somme = /* @__PURE__ */ __name22((l) => l.reduce((t, d) => t + Number(d.montant || 0), 0), "somme");
   const enCours = tousDevis.filter((d) => d.statut === "brouillon" || d.statut === "envoy\xE9");
   const gagnes = tousDevis.filter((d) => d.statut === "accept\xE9" || d.statut === "factur\xE9");
@@ -6645,7 +6643,14 @@ async function pageDevis(env, url, message) {
       <td class="nowrap">${dateFr2(d.date_devis, false)}</td>
       <td class="num"><b>${euros3(d.montant)}</b></td>
       <td>${pastille(d.statut)}</td>
-      <td class="nowrap"><a class="bouton pale" href="?cle=${cle}&page=devis&numero=${d.numero}">Ouvrir</a></td>
+      <td class="nowrap"><div style="display:flex;gap:6px;flex-wrap:wrap">
+        <a class="bouton pale" href="?cle=${cle}&page=devis&numero=${d.numero}">Ouvrir</a>
+        ${d.facture_numero ? "" : `<a class="bouton pale" href="?cle=${cle}&page=devis&numero=${d.numero}&edit=1">${ic("crayon")} Modifier</a>`}
+        <a class="bouton pale" href="/d/${echapper(d.jeton)}" target="_blank" rel="noopener">PDF</a>
+        ${d.facture_numero ? "" : `<form method="POST" action="?cle=${cle}&page=devis&numero=${d.numero}&action=supprimer_devis" style="display:inline;margin:0">
+          <button class="bouton pale" type="submit" style="color:var(--rouge);cursor:pointer"
+            onclick="return confirm('Supprimer d\xE9finitivement le devis n\xB0 ${numeroDevis(d)} ?')">Supprimer</button></form>`}
+      </div></td>
     </tr>`, "ligne");
   return `
   ${message || ""}
