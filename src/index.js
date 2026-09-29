@@ -7835,7 +7835,7 @@ async function radarEnvoyerProspect(env, p, a, objet, texte, origine) {
 async function radarContactsEnAttente(env) {
   try {
     const maintenant = (/* @__PURE__ */ new Date()).toISOString();
-    const file = await env.DB.prepare(`SELECT id, domaine FROM radar_prospects
+    const file = await env.DB.prepare(`SELECT id, domaine FROM radar_prospects INDEXED BY idx_radar_prospects_presente
       WHERE presente_le IS NOT NULL AND (contacts_verifies_le IS NULL OR contacts_version < 2) AND domaine IS NOT NULL
         AND statut IN ('nouveau','\xE0 v\xE9rifier','\xE0 contacter')
         AND (contacts_prochain_essai IS NULL OR contacts_prochain_essai <= ?)
