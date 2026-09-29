@@ -1780,7 +1780,7 @@ function gabaritDevis(d, env) {
 <script>
 function telechargerPdf(){
   if(!window.html2pdf){ window.print(); return; }
-  document.body.classList.add('pdf');
+  document.body.classList.add('pdf'); window.scrollTo(0, 0);
   return html2pdf().set({
     margin:[12,0,12,0], filename:'Devis-${num}.pdf',
     image:{type:'jpeg',quality:0.97},
@@ -1864,6 +1864,8 @@ async function supprimerDevis(env, numero) {
   const d = await lireDevis(env.DB, numero);
   if (!d) return { erreur: "Devis introuvable." };
   await env.DB.prepare("DELETE FROM devis WHERE numero=?").bind(numero).run();
+  await assurerContratsSchema(env.DB);
+  await env.DB.prepare("DELETE FROM contrats WHERE devis_numero=?").bind(numero).run();
   return { ok: true };
 }
 __name22(supprimerDevis, "supprimerDevis");
@@ -1949,6 +1951,395 @@ async function envoyerDevis(env, numero, origine) {
   return { ok: true, email: d.client_email };
 }
 __name22(envoyerDevis, "envoyerDevis");
+// ─── Contrats ────────────────────────────────────────────────────────────
+// Un contrat par devis, qui porte le même numéro. Les clauses sont pré-remplies
+// à partir du devis et restent modifiables tant que le client n'a pas signé.
+// Chaque partie signe en dessinant sa signature (image PNG stockée en base).
+var contratsSchemaOk = false;
+async function assurerContratsSchema(db) {
+  if (contratsSchemaOk) return;
+  await assurerDevisSchema(db);
+  await db.prepare(`CREATE TABLE IF NOT EXISTS contrats (
+    devis_numero      INTEGER PRIMARY KEY,
+    jeton             TEXT NOT NULL,
+    clauses           TEXT NOT NULL,
+    presta_nom        TEXT,
+    presta_signature  TEXT,
+    presta_signe_le   TEXT,
+    client_signataire TEXT,
+    client_signature  TEXT,
+    client_signe_le   TEXT,
+    client_ip         TEXT,
+    envoye_le         TEXT,
+    cree_le           TEXT NOT NULL
+  )`).run();
+  contratsSchemaOk = true;
+}
+__name22(assurerContratsSchema, "assurerContratsSchema");
+var modalitesDevis = /* @__PURE__ */ __name22((d) => {
+  const pct = Number(d.acompte_pct || 0);
+  const acompte = Math.round(Number(d.montant) * pct) / 100;
+  if (pct >= 100) return `La totalit\xE9 du prix est payable \xE0 la signature du pr\xE9sent contrat.`;
+  if (pct <= 0) return `La totalit\xE9 du prix est payable \xE0 la livraison.`;
+  return `Un acompte de ${pct} %, soit ${euros(acompte)}, est payable \xE0 la signature du pr\xE9sent contrat ; le solde de ${euros(Number(d.montant) - acompte)} est payable \xE0 la livraison.`;
+}, "modalitesDevis");
+function clausesParDefaut(d) {
+  const articles = [
+    ["OBJET", `Le pr\xE9sent contrat d\xE9finit les conditions dans lesquelles le Prestataire r\xE9alise pour le Client la prestation \xAB ${d.titre} \xBB, d\xE9crite ci-dessus et dans le devis n\xB0 ${numeroDevis(d)} du ${dateFr(d.date_devis)}, qui fait partie int\xE9grante du contrat.`],
+    ["D\xC9LAI DE R\xC9ALISATION", `La prestation sera livr\xE9e dans un d\xE9lai de ${d.delai_livraison} \xE0 compter de la r\xE9ception de l'acompte et de l'ensemble des \xE9l\xE9ments n\xE9cessaires fournis par le Client (acc\xE8s, contenus, visuels). Tout retard dans la transmission de ces \xE9l\xE9ments d\xE9cale d'autant la date de livraison.`],
+    ["PRIX ET MODALIT\xC9S DE PAIEMENT", `Le prix total de la prestation est de ${euros(d.montant)} TTC (TVA non applicable, article 293 B du CGI). ${modalitesDevis(d)} Les paiements s'effectuent par virement bancaire. En cas de retard de paiement, des p\xE9nalit\xE9s au taux de trois fois le taux d'int\xE9r\xEAt l\xE9gal ainsi qu'une indemnit\xE9 forfaitaire de 40 € pour frais de recouvrement sont exigibles.`],
+    ["OBLIGATIONS DU CLIENT", `Le Client s'engage \xE0 fournir au Prestataire les acc\xE8s, informations et contenus n\xE9cessaires, \xE0 r\xE9pondre dans des d\xE9lais raisonnables aux demandes de validation, et \xE0 r\xE9gler les sommes dues aux \xE9ch\xE9ances pr\xE9vues.`],
+    ["OBLIGATIONS DU PRESTATAIRE", `Le Prestataire s'engage \xE0 r\xE9aliser la prestation avec soin et selon les r\xE8gles de l'art, et \xE0 tenir le Client inform\xE9 de son avancement. Il est tenu \xE0 une obligation de moyens.`],
+    ["DEMANDES SUPPL\xC9MENTAIRES", `Toute demande ne figurant pas dans le devis fera l'objet d'un devis compl\xE9mentaire, soumis \xE0 l'accord du Client avant r\xE9alisation.`],
+    ["PROPRI\xC9T\xC9 DES LIVRABLES", `Les livrables deviennent la propri\xE9t\xE9 du Client apr\xE8s paiement int\xE9gral du prix. Le Prestataire peut mentionner la r\xE9alisation dans ses r\xE9f\xE9rences commerciales, sauf refus \xE9crit du Client.`],
+    ["CONFIDENTIALIT\xC9", `Chaque partie s'engage \xE0 garder confidentielles les informations de l'autre partie dont elle a connaissance \xE0 l'occasion du contrat.`],
+    ["R\xC9SILIATION", `En cas de manquement grave de l'une des parties, non r\xE9par\xE9 dans les quinze jours suivant une mise en demeure, l'autre partie peut r\xE9silier le contrat. Les travaux r\xE9alis\xE9s jusqu'\xE0 la r\xE9siliation restent dus et l'acompte vers\xE9 reste acquis au Prestataire.`],
+    ["DROIT APPLICABLE", `Le pr\xE9sent contrat est soumis au droit fran\xE7ais. En cas de litige, les parties rechercheront une solution amiable avant toute action judiciaire.`]
+  ];
+  if (d.conditions) articles.push(["CONDITIONS PARTICULI\xC8RES", d.conditions]);
+  return articles.map(([t, c], i) => `ARTICLE ${i + 1} — ${t}
+${c}`).join("\n\n");
+}
+__name22(clausesParDefaut, "clausesParDefaut");
+var lireContrat = /* @__PURE__ */ __name22((db, numero) => db.prepare("SELECT * FROM contrats WHERE devis_numero = ?").bind(numero).first(), "lireContrat");
+var lireContratParJeton = /* @__PURE__ */ __name22((db, jeton) => db.prepare("SELECT * FROM contrats WHERE jeton = ?").bind(jeton).first(), "lireContratParJeton");
+var statutContrat = /* @__PURE__ */ __name22((c) => c.client_signature && c.presta_signature ? "sign\xE9" : c.client_signature ? "sign\xE9 par le client" : c.presta_signature ? "en attente du client" : c.envoye_le ? "envoy\xE9" : "brouillon", "statutContrat");
+async function creerContrat(env, numero) {
+  await assurerContratsSchema(env.DB);
+  const d = await lireDevis(env.DB, numero);
+  if (!d) return { erreur: "Devis introuvable." };
+  if (await lireContrat(env.DB, numero)) return { ok: true };
+  const p = env._profil || {};
+  await env.DB.prepare(`INSERT INTO contrats (devis_numero, jeton, clauses, presta_nom, cree_le) VALUES (?, ?, ?, ?, ?)`).bind(numero, nouveauJeton(), clausesParDefaut(d), p.banque_titulaire || p.profil_nom || "AdamEcom", (/* @__PURE__ */ new Date()).toISOString()).run();
+  return { ok: true };
+}
+__name22(creerContrat, "creerContrat");
+async function modifierContrat(env, numero, form) {
+  await assurerContratsSchema(env.DB);
+  const c = await lireContrat(env.DB, numero);
+  if (!c) return { erreur: "Contrat introuvable." };
+  if (c.client_signature) return { erreur: "Le client a d\xE9j\xE0 sign\xE9 : le contrat ne peut plus \xEAtre modifi\xE9." };
+  const clauses = String(form.get("clauses") || "").trim();
+  const nom = String(form.get("presta_nom") || "").trim();
+  if (!clauses) return { erreur: "Les clauses ne peuvent pas \xEAtre vides." };
+  // Modifier le texte annule une signature d\xE9j\xE0 pos\xE9e : on signe ce qu'on a lu.
+  await env.DB.prepare("UPDATE contrats SET clauses=?, presta_nom=?, presta_signature=CASE WHEN clauses=? THEN presta_signature ELSE NULL END, presta_signe_le=CASE WHEN clauses=? THEN presta_signe_le ELSE NULL END WHERE devis_numero=?").bind(clauses, nom || c.presta_nom, clauses, clauses, numero).run();
+  return { ok: true };
+}
+__name22(modifierContrat, "modifierContrat");
+var signatureValide = /* @__PURE__ */ __name22((s) => typeof s === "string" && /^data:image\/png;base64,[A-Za-z0-9+/=]+$/.test(s) && s.length > 200 && s.length < 3e5, "signatureValide");
+async function signerContratPresta(env, numero, form) {
+  await assurerContratsSchema(env.DB);
+  const c = await lireContrat(env.DB, numero);
+  if (!c) return { erreur: "Contrat introuvable." };
+  const sig = String(form.get("signature") || "");
+  if (!signatureValide(sig)) return { erreur: "Dessinez votre signature avant de valider." };
+  await env.DB.prepare("UPDATE contrats SET presta_signature=?, presta_signe_le=? WHERE devis_numero=?").bind(sig, (/* @__PURE__ */ new Date()).toISOString(), numero).run();
+  return { ok: true };
+}
+__name22(signerContratPresta, "signerContratPresta");
+async function signerContratClient(env, jeton, form, ip) {
+  await assurerContratsSchema(env.DB);
+  const c = await lireContratParJeton(env.DB, jeton);
+  if (!c) return { erreur: "Contrat introuvable." };
+  if (c.client_signature) return { erreur: "Ce contrat est d\xE9j\xE0 sign\xE9." };
+  const nom = String(form.get("nom") || "").trim().slice(0, 120);
+  const sig = String(form.get("signature") || "");
+  if (!nom) return { erreur: "Indiquez votre nom et pr\xE9nom." };
+  if (form.get("accepte") !== "1") return { erreur: "Cochez la case \xAB Lu et approuv\xE9 \xBB." };
+  if (!signatureValide(sig)) return { erreur: "Dessinez votre signature dans le cadre." };
+  const maintenant = (/* @__PURE__ */ new Date()).toISOString();
+  await env.DB.prepare("UPDATE contrats SET client_signataire=?, client_signature=?, client_signe_le=?, client_ip=? WHERE jeton=? AND client_signature IS NULL").bind(nom, sig, maintenant, ip || null, jeton).run();
+  await env.DB.prepare("UPDATE devis SET statut='accept\xE9' WHERE numero=? AND statut IN ('brouillon','envoy\xE9','refus\xE9')").bind(c.devis_numero).run();
+  const d = await lireDevis(env.DB, c.devis_numero);
+  if (env.NOTIF_EMAIL && d) {
+    await brevo(env, "/smtp/email", {
+      method: "POST",
+      body: JSON.stringify({
+        sender: { name: "AdamEcom", email: env.SENDER_EMAIL },
+        to: [{ email: env.NOTIF_EMAIL }],
+        subject: `Contrat n\xB0 ${numeroDevis(d)} sign\xE9 par ${nom}`,
+        htmlContent: `<p><b>${echapper(nom)}</b> vient de signer le contrat n\xB0 ${numeroDevis(d)} (\xAB ${echapper(d.titre)} \xBB, ${euros(d.montant)}).</p>`
+      })
+    }).catch(() => {
+    });
+  }
+  return { ok: true };
+}
+__name22(signerContratClient, "signerContratClient");
+async function envoyerContrat(env, numero, origine) {
+  await assurerContratsSchema(env.DB);
+  const c = await lireContrat(env.DB, numero);
+  const d = c && await lireDevis(env.DB, numero);
+  if (!c || !d) return { erreur: "Contrat introuvable." };
+  const p = env._profil || {};
+  const num = numeroDevis(d);
+  const lien = `${origine}/c/${c.jeton}`;
+  if (!await emailAutorise(env, "contrat_envoi")) {
+    await noterEnvoi(env, "contrat_envoi", d.client_email, null, "bloqu\xE9", "mod\xE8le en pause");
+    return { erreur: "L'envoi des contrats est en pause. R\xE9activez-le dans Emails automatiques." };
+  }
+  const cell = `font-family:Helvetica,Arial,sans-serif;font-size:15px;line-height:1.65;color:${NOIR}`;
+  const corps = `<!doctype html><html lang="fr"><head><meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1"></head>
+    <body style="margin:0;padding:24px 12px;background:#EFEDE7">
+    <table role="presentation" width="600" cellpadding="0" cellspacing="0" border="0" align="center"
+      style="width:100%;max-width:600px;background:#fff;border:1px solid ${TRAIT};border-radius:10px">
+      <tr><td align="center" style="padding:30px 28px 18px">
+        <img src="${echapper(p.profil_logo || LOGO)}" alt="${echapper(p.profil_nom || "AdamEcom")}" width="230"
+          style="display:block;border:0;width:230px;max-width:64%;height:auto"></td></tr>
+      <tr><td style="padding:0 28px;${cell}">
+        <p>Bonjour ${echapper(d.client_nom)},</p>
+        <p>Voici le contrat <b>n\xB0 ${num}</b> pour \xAB ${echapper(d.titre)} \xBB (${euros(d.montant)}).
+          Vous pouvez le lire et le signer en ligne en deux minutes, depuis votre ordinateur ou votre t\xE9l\xE9phone.</p></td></tr>
+      <tr><td align="center" style="padding:18px 28px 8px">
+        <a href="${lien}" style="${cell};display:inline-block;background:${NOIR};color:#fff;font-weight:700;
+          padding:14px 28px;border-radius:7px;text-decoration:none">Lire et signer le contrat →</a></td></tr>
+      <tr><td style="padding:14px 28px 28px;${cell}">
+        <p>Bien \xE0 vous,<br><b>Adam</b><br>
+          <span style="color:${GRIS}">${echapper(p.profil_activite || "Consultant Shopify & CRO")} — ${echapper(p.profil_nom || "AdamEcom")}</span></p></td></tr>
+    </table></body></html>`;
+  const objet = await objetEmail(env, "contrat_envoi", `Contrat n\xB0 ${num} \xE0 signer — ${d.titre}`, { numero: num, client: d.client_nom, titre: d.titre });
+  try {
+    await brevo(env, "/smtp/email", {
+      method: "POST",
+      body: JSON.stringify({
+        sender: { name: p.profil_nom || "AdamEcom", email: env.SENDER_EMAIL },
+        to: [{ email: d.client_email, name: d.client_nom }],
+        replyTo: { email: env.SENDER_EMAIL, name: p.profil_nom || "AdamEcom" },
+        subject: objet,
+        htmlContent: corps
+      })
+    });
+    await noterEnvoi(env, "contrat_envoi", d.client_email, objet, "envoy\xE9", null);
+  } catch (e) {
+    await noterEnvoi(env, "contrat_envoi", d.client_email, objet, "\xE9chec", e.message);
+    return { erreur: `Envoi refus\xE9 : ${e.message}` };
+  }
+  await env.DB.prepare("UPDATE contrats SET envoye_le=? WHERE devis_numero=?").bind((/* @__PURE__ */ new Date()).toISOString(), numero).run();
+  return { ok: true, email: d.client_email };
+}
+__name22(envoyerContrat, "envoyerContrat");
+// Cadre de signature \xE0 la souris ou au doigt ; remplit l'input cach\xE9 #sig en PNG.
+var PAVE_SIGNATURE = `<div class="pave"><canvas id="pave" width="600" height="200"></canvas>
+  <button type="button" class="effacer" onclick="effacerPave()">Effacer</button></div>
+<input type="hidden" name="signature" id="sig">
+<script>
+(function(){
+  var cv=document.getElementById('pave'),cx=cv.getContext('2d'),trace=false,vide=true,der=null;
+  cx.lineWidth=2.4;cx.lineCap='round';cx.lineJoin='round';cx.strokeStyle='#14120E';
+  function pos(e){var r=cv.getBoundingClientRect();return{x:(e.clientX-r.left)*cv.width/r.width,y:(e.clientY-r.top)*cv.height/r.height};}
+  cv.addEventListener('pointerdown',function(e){trace=true;der=pos(e);cv.setPointerCapture(e.pointerId);e.preventDefault();});
+  cv.addEventListener('pointermove',function(e){if(!trace)return;var p=pos(e);cx.beginPath();cx.moveTo(der.x,der.y);cx.lineTo(p.x,p.y);cx.stroke();der=p;vide=false;e.preventDefault();});
+  function fin(){if(!trace)return;trace=false;document.getElementById('sig').value=vide?'':cv.toDataURL('image/png');}
+  cv.addEventListener('pointerup',fin);cv.addEventListener('pointercancel',fin);
+  window.effacerPave=function(){cx.clearRect(0,0,cv.width,cv.height);vide=true;document.getElementById('sig').value='';};
+})();
+<\/script>`;
+var STYLE_PAVE = `.pave{position:relative;border:1.5px dashed #BDB6A5;border-radius:9px;background:#fff;max-width:600px}
+  .pave canvas{display:block;width:100%;height:auto;aspect-ratio:3/1;touch-action:none;cursor:crosshair}
+  .pave .effacer{position:absolute;top:8px;right:8px;background:#F3F0E9;border:0;border-radius:6px;padding:6px 10px;font:600 12px/1 inherit;cursor:pointer;color:#14120E}`;
+// Chaque article (titre + texte) reste group\xE9 pour ne pas \xEAtre coup\xE9 entre deux pages du PDF.
+function articlesContrat(clauses) {
+  const groupes = [];
+  for (const bloc of String(clauses || "").replace(/\r/g, "").split(/\n\s*\n/)) {
+    const premiere = bloc.trim().split("\n")[0] || "";
+    const lettres = premiere.replace(/[^A-Za-z\xC0-\xFF]/g, "");
+    const titre = /^ARTICLE\b/i.test(premiere) || lettres.length >= 4 && premiere.length <= 70 && lettres === lettres.toUpperCase();
+    if (titre || !groupes.length) groupes.push([bloc]);
+    else groupes[groupes.length - 1].push(bloc);
+  }
+  return groupes.map((g) => `<div class="article">${formaterContenuDevis(g.join("\n\n"))}</div>`).join("\n");
+}
+__name22(articlesContrat, "articlesContrat");
+function gabaritContrat(c, d, env, opts = {}) {
+  const p = env._profil || {};
+  const num = numeroDevis(d);
+  const eq = /* @__PURE__ */ __name22((x) => `position:absolute;width:46px;height:46px;border:6px solid ${JAUNE};${x}`, "eq");
+  const logo = /^https?:/.test(p.profil_logo || LOGO) ? "/logo-devis" : p.profil_logo;
+  const bloc = /* @__PURE__ */ __name22((titre, nom, sig, le, mention) => `<div class="case">
+      <div class="k">${titre}</div>
+      <div class="qui">${echapper(nom || "")}</div>
+      ${sig ? `<img class="sigimg" src="${echapper(sig)}" alt="Signature">
+        <div class="s">${mention ? "Lu et approuv\xE9 \xB7 " : ""}sign\xE9 \xE9lectroniquement le ${dateFr(le)}</div>` : `<div class="attente">En attente de signature</div>`}
+    </div>`, "bloc");
+  const formClient = !c.client_signature && opts.public ? `
+  <div class="signer" id="signer">
+    <h3>Signer le contrat</h3>
+    ${opts.erreur ? `<div class="err">${echapper(opts.erreur)}</div>` : ""}
+    <form method="POST" onsubmit="if(!document.getElementById('sig').value){alert('Dessinez votre signature dans le cadre.');return false;}">
+      <label>Nom et pr\xE9nom<input name="nom" required value="${echapper(d.client_nom)}"></label>
+      <label style="margin-top:14px">Votre signature <span class="aide">(\xE0 la souris ou au doigt)</span></label>
+      ${PAVE_SIGNATURE}
+      <label class="coche"><input type="checkbox" name="accepte" value="1" required>
+        J'ai lu le contrat et je l'accepte (\xAB Lu et approuv\xE9 \xBB).</label>
+      <button type="submit">Signer le contrat</button>
+    </form>
+  </div>` : "";
+  return `<!doctype html><html lang="fr"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex,nofollow">
+<title>Contrat n\xB0 ${num} — ${echapper(p.profil_nom || "AdamEcom")}</title>
+<style>
+  @page{size:A4;margin:14mm}
+  *{box-sizing:border-box}
+  body{margin:0;background:#E9E7E1;color:${NOIR};
+    font-family:"Helvetica Neue",Helvetica,Arial,system-ui,sans-serif;
+    font-size:15px;line-height:1.6;-webkit-font-smoothing:antialiased}
+  .feuille{position:relative;max-width:860px;margin:28px auto;background:#fff;
+    padding:56px 62px 46px;box-shadow:0 2px 26px rgba(0,0,0,.09)}
+  .eq1{${eq("top:20px;left:20px;border-right:0;border-bottom:0")}}
+  .eq2{${eq("top:20px;right:20px;border-left:0;border-bottom:0")}}
+  .eq3{${eq("bottom:20px;left:20px;border-right:0;border-top:0")}}
+  .eq4{${eq("bottom:20px;right:20px;border-left:0;border-top:0")}}
+  .logo{text-align:center;margin-bottom:30px}
+  .logo img{width:280px;max-width:66%;height:auto;display:inline-block}
+  h1{text-align:center;font-size:22px;letter-spacing:.06em;margin:0 0 4px}
+  .sous{text-align:center;color:${GRIS};font-size:13.5px;margin-bottom:34px}
+  .badge{display:inline-block;background:${NOIR};color:#fff;font-weight:800;
+    font-size:13px;letter-spacing:.05em;padding:8px 18px}
+  .parties{display:flex;gap:28px}
+  .partie{flex:1;min-width:0}
+  .corps{font-size:14.5px;line-height:1.85;margin-top:12px}
+  .corps .eti{color:${GRIS}}
+  .nom{font-weight:800;font-size:16px}
+  .adresse{white-space:pre-line}
+  .bande{background:${JAUNE};text-align:center;font-weight:800;font-size:12.5px;
+    letter-spacing:.18em;padding:12px;margin:36px 0 0}
+  .presta{font-weight:800;font-size:18px;margin:24px 0 12px}
+  .intertitre{margin:22px 0 8px;font-size:13px;font-weight:800;letter-spacing:.1em;text-transform:uppercase;
+    padding-bottom:6px;border-bottom:1px solid ${TRAIT}}
+  .para{margin:8px 0;font-size:14.5px;line-height:1.7;text-align:justify}
+  ul.inclus{list-style:none;margin:6px 0 10px;padding:0}
+  ul.inclus li{position:relative;padding:6px 0 6px 30px;font-size:14.5px;line-height:1.6;
+    border-bottom:1px dashed ${TRAIT};display:flex;gap:16px;align-items:baseline}
+  ul.inclus li:last-child{border-bottom:0}
+  ul.inclus li::before{content:"";position:absolute;left:2px;top:11px;width:14px;height:14px;background:${JAUNE};border-radius:3px}
+  ul.inclus li::after{content:"";position:absolute;left:6px;top:13px;width:4px;height:7px;
+    border:solid ${NOIR};border-width:0 2px 2px 0;transform:rotate(45deg)}
+  .ltxt{flex:1}.prix{margin-left:auto;font-weight:700;white-space:nowrap}
+  .infos{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin:26px 0 0}
+  .info{border:1px solid ${TRAIT};border-radius:9px;padding:14px 16px}
+  .info .k{font-size:11.5px;font-weight:800;letter-spacing:.12em;color:${GRIS};text-transform:uppercase}
+  .info .v{font-weight:800;font-size:15px;margin-top:4px}
+  .fait{margin:34px 0 0;font-size:14.5px}
+  .accord{margin:16px 0 0;display:flex;gap:22px}
+  .accord .case{flex:1;border:1px solid ${TRAIT};border-radius:9px;padding:14px 18px;min-height:170px}
+  .accord .k{font-size:11.5px;font-weight:800;letter-spacing:.12em;color:${GRIS}}
+  .accord .qui{font-weight:800;margin-top:4px}
+  .accord .s{font-size:12px;color:${GRIS};margin-top:2px}
+  .accord .attente{margin-top:34px;color:#B3AC9C;font-size:13px;font-style:italic}
+  .sigimg{display:block;max-width:100%;height:80px;object-fit:contain;object-position:left;margin-top:8px}
+  .pied{margin-top:38px;padding-top:18px;border-top:1px solid ${TRAIT};text-align:center;font-size:11.5px;color:${GRIS}}
+  .signer{max-width:860px;margin:0 auto 40px;background:#fff;padding:28px 62px 34px;box-shadow:0 2px 26px rgba(0,0,0,.09);
+    border-top:6px solid ${JAUNE}}
+  .signer h3{margin:0 0 14px;font-size:18px}
+  .signer label{display:block;font-weight:700;font-size:14px}
+  .signer .aide{font-weight:400;color:${GRIS}}
+  .signer input[name=nom]{display:block;width:100%;max-width:420px;margin-top:6px;padding:11px 13px;font:15px inherit;
+    border:1px solid ${TRAIT};border-radius:8px}
+  .signer .pave{margin-top:8px}
+  .signer .coche{display:flex;gap:10px;align-items:center;font-weight:400;margin:16px 0}
+  .signer button[type=submit]{background:${NOIR};color:#fff;font:700 15px/1 inherit;border:0;padding:15px 28px;border-radius:8px;cursor:pointer}
+  .signer .err{background:#FAEAE4;color:#9E3319;padding:10px 14px;border-radius:8px;margin-bottom:14px}
+  .ok{max-width:860px;margin:0 auto 20px;background:#E8F1E4;color:#2F6B2A;padding:14px 20px;border-radius:9px;font-weight:700}
+  ${STYLE_PAVE}
+  .barre{position:fixed;top:14px;right:14px;display:flex;gap:8px;z-index:5}
+  .barre button,.barre a{background:${JAUNE};color:${NOIR};font:700 14px/1 inherit;border:0;
+    padding:12px 20px;border-radius:8px;cursor:pointer;text-decoration:none}
+  .barre .sec{background:#fff;border:1px solid ${TRAIT}}
+  body.pdf{background:#fff}
+  body.pdf .barre,body.pdf .eq1,body.pdf .eq2,body.pdf .eq3,body.pdf .eq4,body.pdf .signer,body.pdf .ok{display:none}
+  body.pdf .feuille{margin:0 auto;box-shadow:none;width:794px;max-width:none;padding:0 56px}
+  @media(max-width:760px){
+    body{font-size:14px}
+    .feuille{margin:0;padding:34px 20px 30px;box-shadow:none}
+    .eq1,.eq2,.eq3,.eq4{display:none}
+    .parties,.accord{flex-direction:column;gap:20px}
+    .infos{grid-template-columns:1fr}
+    .signer{padding:24px 20px 30px;margin:0}
+    .barre{position:static;padding:14px 20px 0}
+    .barre button,.barre a{flex:1;text-align:center}
+  }
+  @media print{
+    body{background:#fff}
+    .feuille{margin:0;padding:0;box-shadow:none;max-width:none}
+    .barre,.signer,.ok,.eq1,.eq2,.eq3,.eq4{display:none}
+    .infos,.accord,.article,ul.inclus li{break-inside:avoid}
+  }
+</style></head><body>
+<div class="barre"><button onclick="telechargerPdf()">T\xE9l\xE9charger le PDF</button>
+  ${formClient ? `<a class="sec" href="#signer">Signer</a>` : `<button class="sec" onclick="window.print()">Imprimer</button>`}</div>
+${opts.merci ? `<div class="ok" style="margin-top:28px">Merci, votre signature est enregistr\xE9e. Vous pouvez t\xE9l\xE9charger le contrat sign\xE9 en PDF.</div>` : ""}
+<div class="feuille">
+  <div class="eq1"></div><div class="eq2"></div><div class="eq3"></div><div class="eq4"></div>
+  <div class="logo"><img src="${echapper(logo)}" alt="${echapper(p.profil_nom || "AdamEcom")}"></div>
+  <h1>CONTRAT DE PRESTATION DE SERVICES</h1>
+  <div class="sous">Contrat n\xB0 ${num} \xB7 \xE9tabli le ${dateFr(c.cree_le)} \xB7 sur la base du devis n\xB0 ${num}</div>
+
+  <div class="parties">
+    <div class="partie">
+      <span class="badge">LE PRESTATAIRE</span>
+      <div class="corps">
+        <span class="nom">${echapper(p.profil_nom || "AdamEcom")}</span><br>
+        ${p.profil_activite ? `${echapper(p.profil_activite)}<br>` : ""}
+        ${c.presta_nom ? `<span class="eti">Repr\xE9sent\xE9 par</span> ${echapper(c.presta_nom)}<br>` : ""}
+        ${p.profil_email ? `<span class="eti">Email</span> ${echapper(p.profil_email)}<br>` : ""}
+        ${p.profil_telephone ? `<span class="eti">T\xE9l.</span> ${echapper(p.profil_telephone)}<br>` : ""}
+        ${p.profil_site ? `<span class="eti">Site</span> ${echapper(p.profil_site)}` : ""}
+      </div>
+    </div>
+    <div class="partie">
+      <span class="badge">LE CLIENT</span>
+      <div class="corps">
+        <span class="nom">${echapper(d.client_nom)}</span><br>
+        ${d.client_societe ? `${echapper(d.client_societe)}<br>` : ""}
+        ${d.client_adresse ? `<span class="adresse">${echapper(d.client_adresse)}</span><br>` : ""}
+        <span class="eti">Email</span> ${echapper(d.client_email)}
+        ${d.client_telephone ? `<br><span class="eti">T\xE9l.</span> ${echapper(d.client_telephone)}` : ""}
+      </div>
+    </div>
+  </div>
+
+  <div class="bande">OBJET ET PRESTATIONS</div>
+  <div class="presta">${echapper(d.titre)}</div>
+  ${formaterContenuDevis(d.contenu)}
+  <div class="infos">
+    <div class="info"><div class="k">Prix total TTC</div><div class="v">${euros(d.montant)}</div></div>
+    <div class="info"><div class="k">D\xE9lai de livraison</div><div class="v">${echapper(d.delai_livraison)}</div></div>
+    <div class="info"><div class="k">Acompte \xE0 la signature</div><div class="v">${Number(d.acompte_pct || 0)} %</div></div>
+  </div>
+
+  <div class="bande">CONDITIONS DU CONTRAT</div>
+  ${articlesContrat(c.clauses)}
+
+  <div class="fait">Fait en deux exemplaires, sign\xE9s \xE9lectroniquement.</div>
+  <div class="accord">
+    ${bloc("LE PRESTATAIRE", c.presta_nom || p.profil_nom, c.presta_signature, c.presta_signe_le, false)}
+    ${bloc("LE CLIENT", c.client_signataire || d.client_nom, c.client_signature, c.client_signe_le, true)}
+  </div>
+  <div class="pied">Contrat n\xB0 ${num} \xB7 ${echapper(p.profil_nom || "AdamEcom")}${p.profil_site ? ` \xB7 ${echapper(p.profil_site)}` : ""}</div>
+</div>
+${formClient}
+<script src="https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js"><\/script>
+<script>
+function telechargerPdf(){
+  if(!window.html2pdf){ window.print(); return; }
+  document.body.classList.add('pdf'); window.scrollTo(0, 0);
+  return html2pdf().set({
+    margin:[12,0,12,0], filename:'Contrat-${num}.pdf',
+    image:{type:'jpeg',quality:0.97},
+    html2canvas:{scale:2,useCORS:true,backgroundColor:'#ffffff'},
+    jsPDF:{unit:'mm',format:'a4',orientation:'portrait'},
+    pagebreak:{mode:['css','legacy'],avoid:['.infos','.accord','.article','li']}
+  }).from(document.querySelector('.feuille')).save().then(function(){ document.body.classList.remove('pdf'); });
+}
+if(/[?&]telecharger=1/.test(location.search)){
+  window.addEventListener('load', function(){ setTimeout(telechargerPdf, 300); });
+}
+<\/script></body></html>`;
+}
+__name22(gabaritContrat, "gabaritContrat");
 var AUTORISATION = "https://accounts.google.com/o/oauth2/v2/auth";
 var JETON = "https://oauth2.googleapis.com/token";
 var AGENDA = "https://www.googleapis.com/calendar/v3";
@@ -3689,6 +4080,9 @@ var tous2 = /* @__PURE__ */ __name22(async (db, sql, ...args) => {
 }, "tous");
 var echapperJs = /* @__PURE__ */ __name22((s) => String(s || "").replace(/\\/g, "\\\\").replace(/'/g, "\\'").replace(/\n/g, " "), "echapperJs");
 var COULEURS = {
+  "sign\xE9": "vert",
+  "sign\xE9 par le client": "jaune",
+  "en attente du client": "jaune",
   "accept\xE9": "vert",
   "factur\xE9": "vert",
   "refus\xE9": "gris",
@@ -3735,6 +4129,7 @@ var ICONES = {
   clients: '<path d="M16 20v-1.5a4 4 0 0 0-4-4H7a4 4 0 0 0-4 4V20"/><circle cx="9.5" cy="7" r="3.5"/><path d="M17 4.2a3.5 3.5 0 0 1 0 6.6M21 20v-1.5a4 4 0 0 0-3-3.8"/>',
   facturation: '<path d="M6 3h12v18l-3-2-3 2-3-2-3 2z"/><path d="M14 8H9.8a2 2 0 0 0 0 4h2.4a2 2 0 0 1 0 4H9"/><path d="M11.5 6.5v11"/>',
   devis: '<path d="M14 3H6v18h12V7z"/><path d="M14 3v4h4"/><path d="M9 12h6M9 16h6M9 8h2"/>',
+  contrats: '<path d="M14 3H6v18h12V7z"/><path d="M14 3v4h4"/><path d="M8.5 17c1.2-2 2-2 2.6-.8.5 1 1.1 1.2 2-.2.6-.9 1.3-.9 2.4.2"/><path d="M9 9h5M9 12h6"/>',
   meeting: '<rect x="2.5" y="6" width="13" height="12" rx="2.5"/><path d="M15.5 10.5l6-3v9l-6-3z"/>',
   blog: '<path d="M5 4h14v16H5z"/><path d="M8 8h8M8 12h8M8 16h5"/>',
   newsletter: '<rect x="2.5" y="5" width="19" height="14" rx="2.5"/><path d="M3.5 7.5l7.4 5.2a2 2 0 0 0 2.2 0l7.4-5.2"/>',
@@ -3805,6 +4200,12 @@ var PAGES = [
     nom: "Devis",
     groupe: "Activit\xE9",
     sous: "Collez ce qui est inclus : le devis est mis en page avec votre logo, pr\xEAt \xE0 envoyer ou imprimer."
+  },
+  {
+    id: "contrats",
+    nom: "Contrats",
+    groupe: "Activit\xE9",
+    sous: "Un contrat g\xE9n\xE9r\xE9 \xE0 partir d'un devis, sign\xE9 en ligne par vous et par le client."
   },
   {
     id: "meeting",
@@ -6598,6 +6999,8 @@ async function pageDevis(env, url, message) {
     const num = numeroDevis(d);
     const lien = `${url.origin}/d/${d.jeton}`;
     const verrouille = !!d.facture_numero;
+    await assurerContratsSchema(env.DB);
+    const contrat = await lireContrat(env.DB, d.numero);
     if (url.searchParams.get("edit")) {
       return `${message || ""}${formulaire(d, "modifier_devis", null)}
         <div class="actions"><a class="bouton" href="?cle=${cle}&page=devis&numero=${d.numero}">Annuler la modification</a></div>`;
@@ -6630,8 +7033,11 @@ async function pageDevis(env, url, message) {
         <a class="bouton" href="${lien}" target="_blank" rel="noopener">Ouvrir / imprimer</a>
         <a class="bouton" style="padding:13px 24px;font-size:14px"
           href="?cle=${cle}&page=devis&numero=${d.numero}&edit=1">${ic("crayon")} Modifier</a>
+        <a class="bouton" href="?cle=${cle}&page=${contrat ? `contrats&devis=${d.numero}` : `contrats&action=creer_contrat&devis=${d.numero}`}"
+          ${contrat ? "" : `onclick="event.preventDefault();document.getElementById('fcontrat').submit()"`}>${contrat ? "Voir le contrat" : "Cr\xE9er le contrat"}</a>
         <a class="bouton" href="?cle=${cle}&page=devis">Retour aux devis</a>
       </div>
+      <form id="fcontrat" method="POST" action="?cle=${cle}&page=contrats&action=creer_contrat&devis=${d.numero}" style="display:none"></form>
       <div class="actions" style="margin-top:12px">
         ${verrouille ? "" : `${d.statut !== "accept\xE9" ? boutonStatut("accept\xE9", `${ic("valide")} Le client accepte`, "background:#3F7A34;color:#fff") : ""}
         ${d.statut !== "refus\xE9" ? boutonStatut("refus\xE9", "Le client refuse", "background:var(--surface2);color:var(--encre)") : ""}
@@ -6702,6 +7108,125 @@ async function pageDevis(env, url, message) {
   </section>`;
 }
 __name22(pageDevis, "pageDevis");
+async function pageContrats(env, url, message) {
+  await assurerContratsSchema(env.DB);
+  const cle = encodeURIComponent(env.CLE_TEST);
+  const numero = Number(url.searchParams.get("devis") || 0);
+  if (numero) {
+    const c = await lireContrat(env.DB, numero);
+    const d = await lireDevis(env.DB, numero);
+    if (!c || !d) return `<div class="alerte">Contrat introuvable.</div>`;
+    const num = numeroDevis(d);
+    const lien = `${url.origin}/c/${c.jeton}`;
+    const st = statutContrat(c);
+    const act = /* @__PURE__ */ __name22((a) => `?cle=${cle}&page=contrats&devis=${numero}&action=${a}`, "act");
+    return `
+      ${message || ""}
+      <style>${STYLE_PAVE}</style>
+      <section><div class="grille">
+        <div class="carte neutre"><div class="k">Contrat</div><div class="v txt">n\xB0 ${num}</div>
+          <div class="s">${echapper(d.titre)} \xB7 ${euros3(d.montant)}</div></div>
+        <div class="carte ${c.presta_signature ? "bon" : "moyen"}"><div class="k">Votre signature</div>
+          <div class="v txt">${c.presta_signature ? "sign\xE9" : "\xE0 faire"}</div>
+          <div class="s">${c.presta_signe_le ? `le ${dateFr2(c.presta_signe_le)}` : "signez ci-dessous"}</div></div>
+        <div class="carte ${c.client_signature ? "bon" : "neutre"}"><div class="k">Signature du client</div>
+          <div class="v txt">${c.client_signature ? "sign\xE9" : "en attente"}</div>
+          <div class="s">${c.client_signe_le ? `${echapper(c.client_signataire || "")} \xB7 le ${dateFr2(c.client_signe_le)}` : c.envoye_le ? `envoy\xE9 le ${dateFr2(c.envoye_le)}` : "pas encore envoy\xE9"}</div></div>
+      </div></section>
+
+      <section><div class="actions">
+        ${c.client_signature ? "" : `<form method="POST" action="${act("envoyer_contrat")}" style="display:inline">
+          <button class="envoyer" type="submit"
+            onclick="return confirm('Envoyer le contrat \xE0 signer \xE0 ${echapperJs(d.client_email)} ?')">
+            ${ic("envoi")} ${c.envoye_le ? "Renvoyer" : "Envoyer"} \xE0 signer \xE0 ${echapper(d.client_email)}</button></form>
+        <button class="bouton" type="button" onclick="navigator.clipboard.writeText('${lien}').then(function(){alert('Lien de signature copi\xE9 : vous pouvez l\\'envoyer par WhatsApp ou email.')})">Copier le lien de signature</button>`}
+        <a class="bouton" href="${lien}?telecharger=1" target="_blank" rel="noopener">T\xE9l\xE9charger le PDF</a>
+        <a class="bouton" href="?cle=${cle}&page=devis&numero=${numero}">Voir le devis</a>
+        <a class="bouton" href="?cle=${cle}&page=contrats">Retour aux contrats</a>
+      </div></section>
+
+      <section><h2>${c.presta_signature ? "Votre signature" : "Signer le contrat"}</h2>
+        ${c.presta_signature ? `<img src="${echapper(c.presta_signature)}" alt="Votre signature"
+            style="height:80px;background:#fff;border:1px solid var(--trait);border-radius:9px;padding:6px 10px">
+          <details style="margin-top:10px"><summary>Refaire ma signature</summary><div class="dedans">` : ""}
+        <form method="POST" action="${act("signer_contrat")}"
+          onsubmit="if(!document.getElementById('sig').value){alert('Dessinez votre signature dans le cadre.');return false;}">
+          <p class="sec" style="margin:0 0 8px">Dessinez votre signature \xE0 la souris ou au doigt, puis validez.</p>
+          ${PAVE_SIGNATURE}
+          <button class="envoyer" type="submit" style="margin-top:12px">${ic("valide")} Signer en tant que prestataire</button>
+        </form>
+        ${c.presta_signature ? `</div></details>` : ""}
+      </section>
+
+      ${c.client_signature ? `<div class="note">Le client a sign\xE9 : le contrat ne peut plus \xEAtre modifi\xE9.</div>` : `
+      <section><details><summary>Modifier les clauses du contrat</summary><div class="dedans">
+        <form class="f" method="POST" action="${act("modifier_contrat")}" style="border:0;padding:0;background:none">
+          <label>Signataire pour le prestataire<input name="presta_nom" value="${echapper(c.presta_nom || "")}"></label>
+          <div></div>
+          <label class="large">Clauses <span style="font-weight:400">(une ligne en MAJUSCULES devient un titre d'article)</span>
+            <textarea name="clauses" style="min-height:420px">${echapper(c.clauses)}</textarea></label>
+          <p class="sec large" style="margin:-4px 0 0;font-size:12.5px">Modifier le texte annule votre signature : vous re-signez la version finale.</p>
+          <button class="envoyer large" type="submit">Enregistrer les clauses</button>
+        </form></div></details></section>`}
+
+      <section><details><summary>Supprimer ce contrat</summary><div class="dedans">
+        <form method="POST" action="${act("supprimer_contrat")}" style="display:inline">
+          <button class="envoyer" type="submit" style="background:var(--rouge);color:#fff"
+            onclick="return confirm('Supprimer le contrat n\xB0 ${num} ? Les signatures seront perdues. Le devis est conserv\xE9.')">Supprimer le contrat</button></form>
+      </div></details></section>
+
+      <section><h2>Aper\xE7u</h2>
+        <div class="apercu"><iframe src="${lien}?apercu=1" title="Contrat n\xB0 ${num}"></iframe></div>
+      </section>`;
+  }
+  const { results: lignes = [] } = await env.DB.prepare(`SELECT c.devis_numero, c.presta_signe_le, c.client_signe_le, c.envoye_le, c.jeton,
+      (c.presta_signature IS NOT NULL) AS ps, (c.client_signature IS NOT NULL) AS cs,
+      d.date_devis, d.client_nom, d.client_societe, d.titre, d.montant
+    FROM contrats c JOIN devis d ON d.numero = c.devis_numero ORDER BY c.devis_numero DESC LIMIT 100`).all();
+  const { results: sansContrat = [] } = await env.DB.prepare(`SELECT numero, date_devis, client_nom, titre, montant FROM devis
+    WHERE numero NOT IN (SELECT devis_numero FROM contrats) ORDER BY numero DESC LIMIT 100`).all();
+  const statutL = /* @__PURE__ */ __name22((l) => statutContrat({ presta_signature: l.ps, client_signature: l.cs, envoye_le: l.envoye_le }), "statutL");
+  const ligne = /* @__PURE__ */ __name22((l) => `<tr>
+      <td class="nowrap"><b>${numeroDevis({ numero: l.devis_numero })}</b></td>
+      <td>${echapper(l.client_nom)}${l.client_societe ? `<br><span class="sec">${echapper(l.client_societe)}</span>` : ""}</td>
+      <td>${echapper(l.titre)}</td>
+      <td class="num"><b>${euros3(l.montant)}</b></td>
+      <td>${pastille(statutL(l))}</td>
+      <td class="nowrap"><div style="display:flex;gap:6px;flex-wrap:wrap">
+        <a class="bouton pale" href="?cle=${cle}&page=contrats&devis=${l.devis_numero}">Ouvrir</a>
+        <a class="bouton pale" href="/c/${echapper(l.jeton)}?telecharger=1" target="_blank" rel="noopener">PDF</a>
+      </div></td>
+    </tr>`, "ligne");
+  const signes = lignes.filter((l) => l.ps && l.cs);
+  return `
+  ${message || ""}
+  <section><div class="grille">
+    <div class="carte neutre"><div class="k">Contrats</div><div class="v">${lignes.length}</div></div>
+    <div class="carte ${lignes.length - signes.length ? "moyen" : "neutre"}"><div class="k">En attente de signature</div>
+      <div class="v">${lignes.length - signes.length}</div></div>
+    <div class="carte bon"><div class="k">Sign\xE9s par les deux parties</div><div class="v">${signes.length}</div>
+      <div class="s">${euros3(signes.reduce((t, l) => t + Number(l.montant || 0), 0))}</div></div>
+  </div></section>
+
+  <section><h2>Nouveau contrat</h2>
+    ${sansContrat.length ? `<form class="f" method="POST" action="?cle=${cle}&page=contrats&action=creer_contrat">
+      <label class="large">\xC0 partir du devis
+        <select name="devis" required>
+          ${sansContrat.map((d) => `<option value="${d.numero}">n\xB0 ${numeroDevis(d)} — ${echapper(d.client_nom)} — ${echapper(d.titre)} — ${euros3(d.montant)}</option>`).join("")}
+        </select></label>
+      <button class="envoyer large" type="submit">G\xE9n\xE9rer le contrat</button>
+    </form>` : `<div class="note">Tous vos devis ont d\xE9j\xE0 un contrat. <a href="?cle=${cle}&page=devis&numero=nouveau">Cr\xE9er un devis →</a></div>`}
+  </section>
+
+  <section><h2>Mes contrats</h2>
+    ${tableauHtml(
+    [{ nom: "N\xB0" }, { nom: "Client" }, { nom: "Projet" }, { nom: "Montant", classe: "num" }, { nom: "Statut" }, { nom: "" }],
+    lignes.map(ligne),
+    "Aucun contrat pour l'instant. Choisissez un devis ci-dessus pour g\xE9n\xE9rer le premier.",
+    "tab-contrats"
+  )}</section>`;
+}
+__name22(pageContrats, "pageContrats");
 async function pageMeeting(env, url, message) {
   const cle = encodeURIComponent(env.CLE_TEST);
   const id = url.searchParams.get("id");
@@ -9629,6 +10154,16 @@ var EMAILS = [
     role: "Transmet le devis au client, avec le lien vers sa version imprimable."
   },
   {
+    id: "contrat_envoi",
+    nom: "Envoi d'un contrat \xE0 signer",
+    quand: "Quand vous cliquez sur \xAB Envoyer \xE0 signer \xBB sur un contrat",
+    vers: "Le client",
+    auto: false,
+    variables: ["{numero}", "{client}", "{titre}"],
+    objet: "Contrat n\xB0 {numero} \xE0 signer \u2014 {titre}",
+    role: "Envoie au client le lien pour lire et signer le contrat en ligne."
+  },
+  {
     id: "meeting_invitation",
     nom: "Invitation \xE0 un rendez-vous",
     quand: "Quand vous envoyez une invitation",
@@ -10087,6 +10622,27 @@ async function application(env, url, request) {
       const r = await enregistrerClient(env, form);
       const q = r.erreur ? `&err=${encodeURIComponent(r.erreur)}` : `&clientok=${encodeURIComponent(r.nom || "Client")}${r.brevo ? "&brevo=1" : ""}`;
       return Response.redirect(`${url.origin}/?cle=${cle}&page=clients${q}`, 303);
+    } else if (action && action.endsWith("_contrat")) {
+      const n = Number(url.searchParams.get("devis") || form.get("devis"));
+      const retour = /* @__PURE__ */ __name2((q) => Response.redirect(`${url.origin}/?cle=${cle}&page=contrats${q}`, 303), "retour");
+      const err = /* @__PURE__ */ __name2((e) => "&err=" + encodeURIComponent(e), "err");
+      const fiche = `&devis=${n}`;
+      let r;
+      if (action === "creer_contrat") {
+        r = await creerContrat(env, n);
+        return retour(r.erreur ? err(r.erreur) : `${fiche}&ccree=1`);
+      }
+      if (action === "modifier_contrat") r = await modifierContrat(env, n, form);
+      else if (action === "signer_contrat") r = await signerContratPresta(env, n, form);
+      else if (action === "envoyer_contrat") r = await envoyerContrat(env, n, url.origin);
+      else if (action === "supprimer_contrat") {
+        await assurerContratsSchema(env.DB);
+        await env.DB.prepare("DELETE FROM contrats WHERE devis_numero=?").bind(n).run();
+        return retour("&csupp=1");
+      } else return retour("");
+      if (r.erreur) return retour(fiche + err(r.erreur));
+      const ok = { modifier_contrat: "cmaj", signer_contrat: "csigne", envoyer_contrat: "cenvoye" }[action];
+      return retour(`${fiche}&${ok}=${encodeURIComponent(r.email || "1")}`);
     } else if (action && action.endsWith("_devis")) {
       const n = Number(url.searchParams.get("numero"));
       const retour = /* @__PURE__ */ __name2((q) => Response.redirect(`${url.origin}/?cle=${cle}&page=devis${q}`, 303), "retour");
@@ -10313,11 +10869,17 @@ async function application(env, url, request) {
   const dstat = url.searchParams.get("dstat");
   if (dstat) message = `<div class="reussite">Devis marqu\xE9 <b>${echapper(dstat)}</b>.</div>`;
   if (url.searchParams.get("dsupp")) message = `<div class="reussite">Devis supprim\xE9.</div>`;
+  if (url.searchParams.get("ccree")) message = `<div class="reussite">Contrat g\xE9n\xE9r\xE9 \xE0 partir du devis. Relisez-le, signez-le, puis envoyez-le au client.</div>`;
+  if (url.searchParams.get("cmaj")) message = `<div class="reussite">Clauses enregistr\xE9es.</div>`;
+  if (url.searchParams.get("csigne")) message = `<div class="reussite">Votre signature est enregistr\xE9e sur le contrat.</div>`;
+  const cenv = url.searchParams.get("cenvoye");
+  if (cenv) message = `<div class="reussite">Contrat envoy\xE9 \xE0 <b>${echapper(cenv)}</b> pour signature.</div>`;
+  if (url.searchParams.get("csupp")) message = `<div class="reussite">Contrat supprim\xE9.</div>`;
   const err = url.searchParams.get("err");
   if (err) message = `<div class="alerte">${echapper(err)}</div>`;
   let contenu;
   try {
-    contenu = def.id === "facture" ? await pageFacture(env, url, message) : def.id === "devis" ? await pageDevis(env, url, message) : def.id === "meeting" ? await pageMeeting(env, url, message) : def.id === "google" ? await pageGoogle(env, url, message) : def.id === "analytics" ? await pageAnalytics(env, url) : def.id === "taches" ? await pageTaches(env, url, message, await clientsShopify(env), { carteHtml, dateFr: dateFr2 }) : def.id === "newsletter" ? await pageNewsletter(env, url, message) : def.id === "emails" ? await pageEmails(env, url, message) : def.id === "reglages" ? await pageReglages(env, url, message) : def.id === "radar" ? await pageRadar(env, url, message) : def.id === "blog" ? await pageBlog(env, url, message) : def.id === "prospects" ? await pageProspects(env, message) : def.id === "clients" ? await pageClients(env, url, message) : await {
+    contenu = def.id === "facture" ? await pageFacture(env, url, message) : def.id === "contrats" ? await pageContrats(env, url, message) : def.id === "devis" ? await pageDevis(env, url, message) : def.id === "meeting" ? await pageMeeting(env, url, message) : def.id === "google" ? await pageGoogle(env, url, message) : def.id === "analytics" ? await pageAnalytics(env, url) : def.id === "taches" ? await pageTaches(env, url, message, await clientsShopify(env), { carteHtml, dateFr: dateFr2 }) : def.id === "newsletter" ? await pageNewsletter(env, url, message) : def.id === "emails" ? await pageEmails(env, url, message) : def.id === "reglages" ? await pageReglages(env, url, message) : def.id === "radar" ? await pageRadar(env, url, message) : def.id === "blog" ? await pageBlog(env, url, message) : def.id === "prospects" ? await pageProspects(env, message) : def.id === "clients" ? await pageClients(env, url, message) : await {
       apercu: pageApercu,
       facturation: pageFacturation,
       journal: pageJournal
@@ -10385,11 +10947,30 @@ var index_default = {
         headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" }
       });
     }
+    if (url.pathname.startsWith("/c/")) {
+      await assurerContratsSchema(env.DB);
+      const jeton = url.pathname.slice(3);
+      let c = await lireContratParJeton(env.DB, jeton);
+      if (!c) return new Response("Contrat introuvable", { status: 404 });
+      let erreur = null;
+      if (request.method === "POST") {
+        const r = await signerContratClient(env, jeton, await request.formData(), request.headers.get("cf-connecting-ip"));
+        if (!r.erreur) return Response.redirect(`${url.origin}/c/${jeton}?merci=1`, 303);
+        erreur = r.erreur;
+        c = await lireContratParJeton(env.DB, jeton);
+      }
+      const d = await lireDevis(env.DB, c.devis_numero);
+      if (!d) return new Response("Devis introuvable", { status: 404 });
+      await chargerProfil(env);
+      return new Response(gabaritContrat(c, d, env, { public: !url.searchParams.get("apercu"), erreur, merci: !!url.searchParams.get("merci") }), {
+        headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" }
+      });
+    }
     if (url.pathname === "/logo-devis") {
       const p = await chargerProfil(env);
       const src = /^https?:/.test(p.profil_logo || "") ? p.profil_logo : LOGO;
-      const r = await fetch(src);
-      if (!r.ok) return new Response("Logo introuvable", { status: 404 });
+      const r = await fetch(src).catch(() => null);
+      if (!r || !r.ok) return new Response("Logo introuvable", { status: 404 });
       return new Response(r.body, {
         headers: { "content-type": r.headers.get("content-type") || "image/png", "cache-control": "public, max-age=86400" }
       });

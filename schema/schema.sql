@@ -151,6 +151,21 @@ CREATE TABLE devis (
   cree_le          TEXT NOT NULL
 );
 
+CREATE TABLE contrats (
+  devis_numero      INTEGER PRIMARY KEY,         -- un contrat par devis, même numéro
+  jeton             TEXT NOT NULL,               -- lien public de signature
+  clauses           TEXT NOT NULL,
+  presta_nom        TEXT,
+  presta_signature  TEXT,                        -- image PNG (data URL)
+  presta_signe_le   TEXT,
+  client_signataire TEXT,
+  client_signature  TEXT,
+  client_signe_le   TEXT,
+  client_ip         TEXT,
+  envoye_le         TEXT,
+  cree_le           TEXT NOT NULL
+);
+
 CREATE TABLE file_emails (
   uri TEXT PRIMARY KEY,
   email TEXT NOT NULL,
