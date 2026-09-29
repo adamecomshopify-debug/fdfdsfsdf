@@ -1682,10 +1682,6 @@ function gabaritDevis(d, env) {
     background:#F7F5F0;border-radius:9px;padding:16px 20px}
   .conditions b{display:block;font-size:11.5px;letter-spacing:.12em;color:${GRIS};margin-bottom:4px}
 
-  .accord{margin:34px 0 0;display:flex;gap:22px}
-  .accord .case{flex:1;border:1px solid ${TRAIT};border-radius:9px;padding:14px 18px;min-height:130px}
-  .accord .k{font-size:11.5px;font-weight:800;letter-spacing:.12em;color:${GRIS}}
-  .accord .s{font-size:12.5px;color:${GRIS};margin-top:4px}
 
   .pied{margin-top:42px;padding-top:20px;border-top:1px solid ${TRAIT};
     text-align:center;font-weight:800;font-size:14px}
@@ -1707,7 +1703,6 @@ function gabaritDevis(d, env) {
     .bande{letter-spacing:.1em;font-size:11.5px}
     .infos{grid-template-columns:1fr}
     .totaux{justify-content:stretch}.totaux table{width:100%;min-width:0}
-    .accord{flex-direction:column}
     .barre{position:static;padding:14px 20px 0}
     .barre button{width:100%}
   }
@@ -1716,7 +1711,7 @@ function gabaritDevis(d, env) {
     .feuille{margin:0;padding:0;box-shadow:none;max-width:none}
     .barre{display:none}
     .eq1,.eq2,.eq3,.eq4{display:none}
-    .infos,.totaux,.accord,.conditions,ul.inclus li{break-inside:avoid}
+    .infos,.totaux,.conditions,ul.inclus li{break-inside:avoid}
   }
 </style></head><body>
 <div class="barre"><button onclick="window.print()">Imprimer / enregistrer en PDF</button></div>
@@ -1770,12 +1765,6 @@ function gabaritDevis(d, env) {
   </table></div>
 
   ${d.conditions ? `<div class="conditions"><b>CONDITIONS PARTICULI\xC8RES</b>${echapper(d.conditions)}</div>` : ""}
-
-  <div class="accord">
-    <div class="case"><div class="k">DATE</div></div>
-    <div class="case"><div class="k">SIGNATURE DU CLIENT</div>
-      <div class="s">Pr\xE9c\xE9d\xE9e de la mention \xAB Bon pour accord \xBB</div></div>
-  </div>
 
   <div class="pied">${echapper(p.profil_remerciement || "Adam Ecom vous remercie pour votre confiance.")}</div>
   <div class="mentions">
@@ -1916,7 +1905,7 @@ async function envoyerDevis(env, numero, origine) {
         <a href="${lien}" style="${cell};display:inline-block;background:${NOIR};color:#fff;font-weight:700;
           padding:14px 28px;border-radius:7px;text-decoration:none">Voir et t\xE9l\xE9charger le devis \u2192</a></td></tr>
       <tr><td style="padding:14px 28px 28px;${cell}">
-        <p>Pour valider, il vous suffit de r\xE9pondre \xE0 cet email ou de me renvoyer le devis sign\xE9 avec la mention \xAB Bon pour accord \xBB.</p>
+        <p>Pour valider, il vous suffit de r\xE9pondre \xE0 cet email.</p>
         <p>Bien \xE0 vous,<br><b>Adam</b><br>
           <span style="color:${GRIS}">${echapper(p.profil_activite || "Consultant Shopify & CRO")} \u2014 ${echapper(p.profil_nom || "AdamEcom")}</span></p></td></tr>
     </table></body></html>`;
@@ -6563,9 +6552,8 @@ async function pageDevis(env, url, message) {
       <label>Acompte \xE0 la signature<select name="acompte_pct">
         ${[0, 30, 40, 50, 100].map((v) => `<option value="${v}"${v === acompte ? " selected" : ""}>${v === 0 ? "Aucun (100 % \xE0 la livraison)" : v === 100 ? "100 % \xE0 la signature" : `${v} %`}</option>`).join("")}
       </select></label>
-      <label>Validit\xE9 du devis<select name="validite_jours">
-        ${[15, 30, 60, 90].map((v) => `<option value="${v}"${v === Number(d ? d.validite_jours : 30) ? " selected" : ""}>${v} jours</option>`).join("")}
-      </select></label>
+      <label>Validit\xE9 du devis (en jours)<input name="validite_jours" type="number" min="1" max="365" step="1" required
+        value="${Number(d ? d.validite_jours : 30)}" placeholder="30"></label>
       <label>Date du devis<input name="date_devis" type="date" required value="${val("date_devis", aujourdhui).slice(0, 10)}"></label>
       <div></div>
       <label class="large">Conditions particuli\xE8res <span style="font-weight:400">(facultatif)</span>
