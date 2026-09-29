@@ -1560,7 +1560,8 @@ async function assurerDevisSchema(db) {
   devisSchemaOk = true;
 }
 __name22(assurerDevisSchema, "assurerDevisSchema");
-var numeroDevis = /* @__PURE__ */ __name22((d) => `D-${String(d.date_devis || "").slice(0, 4)}-${String(d.numero).padStart(3, "0")}`, "numeroDevis");
+var DEVIS_PREMIER_NUMERO = 8754;
+var numeroDevis = /* @__PURE__ */ __name22((d) => String(d.numero), "numeroDevis");
 var finValiditeDevis = /* @__PURE__ */ __name22((d) => {
   const t = new Date(String(d.date_devis).slice(0, 10) + "T00:00:00Z");
   t.setUTCDate(t.getUTCDate() + Number(d.validite_jours || 30));
@@ -1822,9 +1823,9 @@ async function creerDevis(env, form) {
   const { c, erreur } = champsDevis(form);
   if (erreur) return { erreur };
   const r = await env.DB.prepare(
-    `INSERT INTO devis (${COLONNES_DEVIS.join(", ")}, statut, jeton, cree_le)
-     VALUES (${COLONNES_DEVIS.map(() => "?").join(", ")}, 'brouillon', ?, ?)`
-  ).bind(...COLONNES_DEVIS.map((k) => c[k]), nouveauJeton(), (/* @__PURE__ */ new Date()).toISOString()).run();
+    `INSERT INTO devis (numero, ${COLONNES_DEVIS.join(", ")}, statut, jeton, cree_le)
+     SELECT MAX(?, COALESCE(MAX(numero), 0) + 1), ${COLONNES_DEVIS.map(() => "?").join(", ")}, 'brouillon', ?, ? FROM devis`
+  ).bind(DEVIS_PREMIER_NUMERO, ...COLONNES_DEVIS.map((k) => c[k]), nouveauJeton(), (/* @__PURE__ */ new Date()).toISOString()).run();
   return { numero: r.meta.last_row_id };
 }
 __name22(creerDevis, "creerDevis");
