@@ -129,6 +129,28 @@ CREATE TABLE factures (
   cree_le        TEXT NOT NULL
 , payee_le TEXT, commande_shopify TEXT, commande_shopify_id TEXT, annulee_le TEXT, motif_annulation TEXT);
 
+CREATE TABLE devis (
+  numero           INTEGER PRIMARY KEY AUTOINCREMENT,
+  date_devis       TEXT NOT NULL,
+  validite_jours   INTEGER NOT NULL DEFAULT 30,
+  client_nom       TEXT NOT NULL,
+  client_societe   TEXT,
+  client_email     TEXT NOT NULL,
+  client_telephone TEXT,
+  client_adresse   TEXT,
+  titre            TEXT NOT NULL,
+  contenu          TEXT NOT NULL,              -- texte collé, mis en forme à l'affichage
+  montant          REAL NOT NULL,
+  acompte_pct      INTEGER NOT NULL DEFAULT 50,
+  delai_livraison  TEXT NOT NULL,
+  conditions       TEXT,
+  statut           TEXT NOT NULL DEFAULT 'brouillon',  -- brouillon | envoyé | accepté | refusé | facturé
+  envoye_le        TEXT,
+  facture_numero   INTEGER,
+  jeton            TEXT NOT NULL,              -- lien public, non devinable
+  cree_le          TEXT NOT NULL
+);
+
 CREATE TABLE file_emails (
   uri TEXT PRIMARY KEY,
   email TEXT NOT NULL,
