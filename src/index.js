@@ -1822,7 +1822,6 @@ async function modifierDevis(env, numero, form) {
   await assurerDevisSchema(env.DB);
   const d = await lireDevis(env.DB, numero);
   if (!d) return { erreur: "Devis introuvable." };
-  if (d.facture_numero) return { erreur: "Ce devis a d\xE9j\xE0 \xE9t\xE9 transform\xE9 en facture." };
   const { c, erreur } = champsDevis(form);
   if (erreur) return { erreur };
   await env.DB.prepare(`UPDATE devis SET ${COLONNES_DEVIS.map((k) => `${k}=?`).join(", ")} WHERE numero=?`).bind(...COLONNES_DEVIS.map((k) => c[k]), numero).run();
@@ -1843,7 +1842,6 @@ async function supprimerDevis(env, numero) {
   await assurerDevisSchema(env.DB);
   const d = await lireDevis(env.DB, numero);
   if (!d) return { erreur: "Devis introuvable." };
-  if (d.facture_numero) return { erreur: "Ce devis est li\xE9 \xE0 une facture : il ne peut pas \xEAtre supprim\xE9." };
   await env.DB.prepare("DELETE FROM devis WHERE numero=?").bind(numero).run();
   return { ok: true };
 }
@@ -6579,7 +6577,7 @@ async function pageDevis(env, url, message) {
     const num = numeroDevis(d);
     const lien = `${url.origin}/d/${d.jeton}`;
     const verrouille = !!d.facture_numero;
-    if (url.searchParams.get("edit") && !verrouille) {
+    if (url.searchParams.get("edit")) {
       return `${message || ""}${formulaire(d, "modifier_devis", null)}
         <div class="actions"><a class="bouton" href="?cle=${cle}&page=devis&numero=${d.numero}">Annuler la modification</a></div>`;
     }
@@ -6608,22 +6606,21 @@ async function pageDevis(env, url, message) {
             ${ic("envoi")} ${d.envoye_le ? "Renvoyer \xE0" : "Envoyer \xE0"} ${echapper(d.client_email)}</button>
         </form>
         <a class="bouton" href="${lien}" target="_blank" rel="noopener">Ouvrir / t\xE9l\xE9charger en PDF</a>
-        ${verrouille ? "" : `<a class="bouton" style="padding:13px 24px;font-size:14px"
-          href="?cle=${cle}&page=devis&numero=${d.numero}&edit=1">${ic("crayon")} Modifier</a>`}
+        <a class="bouton" style="padding:13px 24px;font-size:14px"
+          href="?cle=${cle}&page=devis&numero=${d.numero}&edit=1">${ic("crayon")} Modifier</a>
         <a class="bouton" href="?cle=${cle}&page=devis">Retour aux devis</a>
       </div>
-      ${verrouille ? "" : `<div class="actions" style="margin-top:12px">
-        ${d.statut !== "accept\xE9" ? boutonStatut("accept\xE9", `${ic("valide")} Le client accepte`, "background:#3F7A34;color:#fff") : ""}
+      <div class="actions" style="margin-top:12px">
+        ${verrouille ? "" : `${d.statut !== "accept\xE9" ? boutonStatut("accept\xE9", `${ic("valide")} Le client accepte`, "background:#3F7A34;color:#fff") : ""}
         ${d.statut !== "refus\xE9" ? boutonStatut("refus\xE9", "Le client refuse", "background:var(--surface2);color:var(--encre)") : ""}
         <form method="POST" action="?cle=${cle}&page=devis&numero=${d.numero}&action=facturer_devis" style="display:inline">
           <button class="envoyer" type="submit" style="background:var(--encre);color:var(--fond)"
             onclick="return confirm('Cr\xE9er une facture (brouillon) de ${euros3(d.montant)} \xE0 partir de ce devis ?')">
-            Transformer en facture</button></form>
+            Transformer en facture</button></form>`}
         <form method="POST" action="?cle=${cle}&page=devis&numero=${d.numero}&action=supprimer_devis" style="display:inline">
           <button class="envoyer" type="submit" style="background:var(--rouge);color:#fff"
-            onclick="return confirm('Supprimer d\xE9finitivement le devis n\xB0 ${num} ?')">Supprimer</button></form>
+            onclick="return confirm('Supprimer d\xE9finitivement le devis n\xB0 ${num} ?${verrouille ? ` La facture n\xB0 ${d.facture_numero} est conserv\xE9e.` : ""}')">Supprimer</button></form>
       </div>
-`}
       </section>
 
       <section><h2>Aper\xE7u</h2>
@@ -6645,11 +6642,11 @@ async function pageDevis(env, url, message) {
       <td>${pastille(d.statut)}</td>
       <td class="nowrap"><div style="display:flex;gap:6px;flex-wrap:wrap">
         <a class="bouton pale" href="?cle=${cle}&page=devis&numero=${d.numero}">Ouvrir</a>
-        ${d.facture_numero ? "" : `<a class="bouton pale" href="?cle=${cle}&page=devis&numero=${d.numero}&edit=1">${ic("crayon")} Modifier</a>`}
+        <a class="bouton pale" href="?cle=${cle}&page=devis&numero=${d.numero}&edit=1">${ic("crayon")} Modifier</a>
         <a class="bouton pale" href="/d/${echapper(d.jeton)}" target="_blank" rel="noopener">PDF</a>
-        ${d.facture_numero ? "" : `<form method="POST" action="?cle=${cle}&page=devis&numero=${d.numero}&action=supprimer_devis" style="display:inline;margin:0">
+        <form method="POST" action="?cle=${cle}&page=devis&numero=${d.numero}&action=supprimer_devis" style="display:inline;margin:0">
           <button class="bouton pale" type="submit" style="color:var(--rouge);cursor:pointer"
-            onclick="return confirm('Supprimer d\xE9finitivement le devis n\xB0 ${numeroDevis(d)} ?')">Supprimer</button></form>`}
+            onclick="return confirm('Supprimer d\xE9finitivement le devis n\xB0 ${numeroDevis(d)} ?')">Supprimer</button></form>
       </div></td>
     </tr>`, "ligne");
   return `
