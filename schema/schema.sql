@@ -144,6 +144,8 @@ CREATE TABLE devis (
   acompte_pct      INTEGER NOT NULL DEFAULT 50,
   delai_livraison  TEXT NOT NULL,
   conditions       TEXT,
+  express_delai    TEXT,                       -- option livraison express
+  express_prix     REAL,
   statut           TEXT NOT NULL DEFAULT 'brouillon',  -- brouillon | envoyé | accepté | refusé | facturé
   envoye_le        TEXT,
   facture_numero   INTEGER,

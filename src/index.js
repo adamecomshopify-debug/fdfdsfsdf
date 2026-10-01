@@ -1557,6 +1557,10 @@ async function assurerDevisSchema(db) {
     jeton           TEXT NOT NULL,
     cree_le         TEXT NOT NULL
   )`).run();
+  for (const col of ["express_delai TEXT", "express_prix REAL"]) {
+    await db.prepare(`ALTER TABLE devis ADD COLUMN ${col}`).run().catch(() => {
+    });
+  }
   devisSchemaOk = true;
 }
 __name22(assurerDevisSchema, "assurerDevisSchema");
@@ -1670,6 +1674,11 @@ function gabaritDevis(d, env) {
   .info .k{font-size:11.5px;font-weight:800;letter-spacing:.12em;color:${GRIS};text-transform:uppercase}
   .info .v{font-weight:800;font-size:15.5px;margin-top:4px}
 
+  .express{display:flex;gap:16px;align-items:center;justify-content:space-between;margin:12px 0 0;
+    border:2px solid ${JAUNE};background:#FFFBE6;border-radius:9px;padding:14px 18px}
+  .express .k{font-size:11.5px;font-weight:800;letter-spacing:.12em;color:${GRIS};text-transform:uppercase}
+  .express .v{font-weight:700;font-size:15px;margin-top:3px}
+  .express .px{font-weight:800;font-size:18px;white-space:nowrap}
   .totaux{margin:34px 0 0;display:flex;justify-content:flex-end}
   .totaux table{border-collapse:collapse;min-width:320px}
   .totaux td{padding:9px 0;font-size:15px}
@@ -1743,7 +1752,7 @@ function gabaritDevis(d, env) {
         <span class="nom">${echapper(d.client_nom)}</span><br>
         ${d.client_societe ? `${echapper(d.client_societe)}<br>` : ""}
         ${d.client_adresse ? `<span class="adresse">${echapper(d.client_adresse)}</span><br>` : ""}
-        <span class="eti">Email</span> ${echapper(d.client_email)}
+        ${d.client_email ? `<span class="eti">Email</span> ${echapper(d.client_email)}` : ""}
         ${d.client_telephone ? `<br><span class="eti">T\xE9l.</span> ${echapper(d.client_telephone)}` : ""}
       </div>
     </div>
@@ -1758,6 +1767,9 @@ function gabaritDevis(d, env) {
     <div class="info"><div class="k">Paiement</div><div class="v">${paiement}</div></div>
     <div class="info"><div class="k">Validit\xE9 du devis</div><div class="v">${Number(d.validite_jours || 30)} jours</div></div>
   </div>
+  ${d.express_prix ? `<div class="express"><div><div class="k">Option \xB7 Livraison express</div>
+      <div class="v">Livraison en ${echapper(d.express_delai || "")} au lieu de ${echapper(d.delai_livraison)}</div></div>
+    <div class="px">+ ${euros(d.express_prix)}</div></div>` : ""}
 
   <div class="totaux"><table>
     <tr><td class="l">Sous-total</td><td class="v">${euros(d.montant)}</td></tr>
@@ -1766,6 +1778,7 @@ function gabaritDevis(d, env) {
     ${Number(d.acompte_pct) > 0 && Number(d.acompte_pct) < 100 ? `
     <tr class="ac"><td class="l">Acompte \xE0 la signature (${d.acompte_pct} %)</td><td class="v">${euros(acompte)}</td></tr>
     <tr class="ac"><td class="l">Solde \xE0 la livraison</td><td class="v">${euros(solde)}</td></tr>` : ""}
+    ${d.express_prix ? `<tr class="ac"><td class="l">Total avec livraison express</td><td class="v">${euros(Number(d.montant) + Number(d.express_prix))}</td></tr>` : ""}
   </table></div>
 
   ${d.conditions ? `<div class="conditions"><b>CONDITIONS PARTICULI\xC8RES</b>${echapper(d.conditions)}</div>` : ""}
@@ -1815,11 +1828,14 @@ function champsDevis(form) {
     montant,
     acompte_pct: acompte,
     delai_livraison: v("delai_livraison"),
-    conditions: v("conditions") || null
+    conditions: v("conditions") || null,
+    express_delai: form.get("express") === "1" ? v("express_delai") || null : null,
+    express_prix: form.get("express") === "1" ? Number(v("express_prix").replace(/[^\d,.]/g, "").replace(",", ".")) || null : null
   };
   const erreurs = [];
   if (!c.client_nom) erreurs.push("le nom du client");
-  if (!c.client_email.includes("@")) erreurs.push("un email valide");
+  if (c.client_email && !c.client_email.includes("@")) erreurs.push("un email valide (ou laissez le champ vide)");
+  if (form.get("express") === "1" && (!c.express_delai || !c.express_prix)) erreurs.push("le d\xE9lai et le tarif de la livraison express");
   if (!c.titre) erreurs.push("le titre du projet");
   if (!c.contenu) erreurs.push("ce qui est inclus");
   if (!c.delai_livraison) erreurs.push("le d\xE9lai de livraison");
@@ -1827,7 +1843,7 @@ function champsDevis(form) {
   return erreurs.length ? { erreur: `Il manque ${erreurs.join(", ")}.` } : { c };
 }
 __name22(champsDevis, "champsDevis");
-var COLONNES_DEVIS = ["date_devis", "validite_jours", "client_nom", "client_societe", "client_email", "client_telephone", "client_adresse", "titre", "contenu", "montant", "acompte_pct", "delai_livraison", "conditions"];
+var COLONNES_DEVIS = ["date_devis", "validite_jours", "client_nom", "client_societe", "client_email", "client_telephone", "client_adresse", "titre", "contenu", "montant", "acompte_pct", "delai_livraison", "conditions", "express_delai", "express_prix"];
 async function creerDevis(env, form) {
   await assurerDevisSchema(env.DB);
   const { c, erreur } = champsDevis(form);
@@ -1884,6 +1900,7 @@ async function facturerDevis(env, numero) {
 D\xE9lai de livraison : ${d.delai_livraison}
 Selon devis n\xB0 ${numeroDevis(d)} du ${dateFr(d.date_devis)}.`);
   form.set("montant", String(d.montant));
+  if (!d.client_email) return { erreur: "Une facture a besoin de l'email du client : ajoutez-le au devis avec \xAB Modifier \xBB, puis recommencez." };
   const r = await creerFacture(env, form);
   if (r.erreur) return r;
   await env.DB.prepare("UPDATE devis SET statut='factur\xE9', facture_numero=? WHERE numero=?").bind(r.numero, numero).run();
@@ -1897,6 +1914,7 @@ async function envoyerDevis(env, numero, origine) {
   const p = env._profil || {};
   const num = numeroDevis(d);
   const lien = `${origine}/d/${d.jeton}`;
+  if (!d.client_email) return { erreur: "Ce devis n'a pas d'email client. Ajoutez-le avec \xAB Modifier \xBB, ou t\xE9l\xE9chargez le PDF pour l'envoyer vous-m\xEAme." };
   if (!await emailAutorise(env, "devis_envoi")) {
     await noterEnvoi(env, "devis_envoi", d.client_email, null, "bloqu\xE9", "mod\xE8le en pause");
     return { erreur: "L'envoi des devis est en pause. R\xE9activez-le dans Emails automatiques." };
@@ -2075,6 +2093,7 @@ async function envoyerContrat(env, numero, origine) {
   const p = env._profil || {};
   const num = numeroDevis(d);
   const lien = `${origine}/c/${c.jeton}`;
+  if (!d.client_email) return { erreur: "Ce devis n'a pas d'email client : copiez le lien de signature pour l'envoyer par WhatsApp." };
   if (!await emailAutorise(env, "contrat_envoi")) {
     await noterEnvoi(env, "contrat_envoi", d.client_email, null, "bloqu\xE9", "mod\xE8le en pause");
     return { erreur: "L'envoi des contrats est en pause. R\xE9activez-le dans Emails automatiques." };
@@ -2295,7 +2314,7 @@ ${opts.merci ? `<div class="ok" style="margin-top:28px">Merci, votre signature e
         <span class="nom">${echapper(d.client_nom)}</span><br>
         ${d.client_societe ? `${echapper(d.client_societe)}<br>` : ""}
         ${d.client_adresse ? `<span class="adresse">${echapper(d.client_adresse)}</span><br>` : ""}
-        <span class="eti">Email</span> ${echapper(d.client_email)}
+        ${d.client_email ? `<span class="eti">Email</span> ${echapper(d.client_email)}` : ""}
         ${d.client_telephone ? `<br><span class="eti">T\xE9l.</span> ${echapper(d.client_telephone)}` : ""}
       </div>
     </div>
@@ -6954,7 +6973,7 @@ async function pageDevis(env, url, message) {
       <label>Nom du client<input name="client_nom" id="nomD" required value="${val("client_nom")}" placeholder="Nicolas Visine"></label>
       <label>Soci\xE9t\xE9 <span style="font-weight:400">(facultatif)</span>
         <input name="client_societe" value="${val("client_societe")}" placeholder="T\xF6sty.fr"></label>
-      <label>Email du client<input name="client_email" id="emailD" type="email" required value="${val("client_email")}" placeholder="client@exemple.com"></label>
+      <label>Email du client <span style="font-weight:400">(facultatif)</span><input name="client_email" id="emailD" type="email" value="${val("client_email")}" placeholder="client@exemple.com"></label>
       <label>T\xE9l\xE9phone <span style="font-weight:400">(facultatif)</span>
         <input name="client_telephone" value="${val("client_telephone")}" placeholder="+33 6 12 34 56 78"></label>
       <label class="large">Adresse du client <span style="font-weight:400">(facultatif)</span>
@@ -6972,6 +6991,15 @@ async function pageDevis(env, url, message) {
       <label>Acompte \xE0 la signature<select name="acompte_pct">
         ${[0, 30, 40, 50, 100].map((v) => `<option value="${v}"${v === acompte ? " selected" : ""}>${v === 0 ? "Aucun (100 % \xE0 la livraison)" : v === 100 ? "100 % \xE0 la signature" : `${v} %`}</option>`).join("")}
       </select></label>
+      <label class="large" style="flex-direction:row;align-items:center;gap:10px">
+        <input type="checkbox" name="express" value="1" style="width:auto" ${d && d.express_prix ? "checked" : ""}
+          onchange="document.getElementById('blocExpress').style.display=this.checked?'contents':'none'">
+        Proposer une livraison express (en option)</label>
+      <div id="blocExpress" style="display:${d && d.express_prix ? "contents" : "none"}">
+        <label>D\xE9lai en express<input name="express_delai" value="${val("express_delai")}" placeholder="5 jours ouvr\xE9s"></label>
+        <label>Tarif de l'express en euros <span style="font-weight:400">(en plus du prix)</span>
+          <input name="express_prix" inputmode="decimal" value="${val("express_prix")}" placeholder="200"></label>
+      </div>
       <label>Validit\xE9 du devis (en jours)<input name="validite_jours" type="number" min="1" max="365" step="1" required
         value="${Number(d ? d.validite_jours : 30)}" placeholder="30"></label>
       <label>Date du devis<input name="date_devis" type="date" required value="${val("date_devis", aujourdhui).slice(0, 10)}"></label>
@@ -7024,11 +7052,11 @@ async function pageDevis(env, url, message) {
       </div></section>
 
       <section><div class="actions">
-        <form method="POST" action="?cle=${cle}&page=devis&numero=${d.numero}&action=envoyer_devis" style="display:inline">
+        ${d.client_email ? `<form method="POST" action="?cle=${cle}&page=devis&numero=${d.numero}&action=envoyer_devis" style="display:inline">
           <button class="envoyer" type="submit"
             onclick="return confirm('Envoyer le devis n\xB0 ${num} \xE0 ${echapperJs(d.client_email)} ?')">
             ${ic("envoi")} ${d.envoye_le ? "Renvoyer \xE0" : "Envoyer \xE0"} ${echapper(d.client_email)}</button>
-        </form>
+        </form>` : ""}
         <a class="bouton" href="${lien}?telecharger=1" target="_blank" rel="noopener">T\xE9l\xE9charger le PDF</a>
         <a class="bouton" href="${lien}" target="_blank" rel="noopener">Ouvrir / imprimer</a>
         <a class="bouton" style="padding:13px 24px;font-size:14px"
@@ -7135,10 +7163,10 @@ async function pageContrats(env, url, message) {
       </div></section>
 
       <section><div class="actions">
-        ${c.client_signature ? "" : `<form method="POST" action="${act("envoyer_contrat")}" style="display:inline">
+        ${c.client_signature ? "" : `${d.client_email ? `<form method="POST" action="${act("envoyer_contrat")}" style="display:inline">
           <button class="envoyer" type="submit"
             onclick="return confirm('Envoyer le contrat \xE0 signer \xE0 ${echapperJs(d.client_email)} ?')">
-            ${ic("envoi")} ${c.envoye_le ? "Renvoyer" : "Envoyer"} \xE0 signer \xE0 ${echapper(d.client_email)}</button></form>
+            ${ic("envoi")} ${c.envoye_le ? "Renvoyer" : "Envoyer"} \xE0 signer \xE0 ${echapper(d.client_email)}</button></form>` : ""}
         <button class="bouton" type="button" onclick="navigator.clipboard.writeText('${lien}').then(function(){alert('Lien de signature copi\xE9 : vous pouvez l\\'envoyer par WhatsApp ou email.')})">Copier le lien de signature</button>`}
         <a class="bouton" href="${lien}?telecharger=1" target="_blank" rel="noopener">T\xE9l\xE9charger le PDF</a>
         <a class="bouton" href="?cle=${cle}&page=devis&numero=${numero}">Voir le devis</a>
