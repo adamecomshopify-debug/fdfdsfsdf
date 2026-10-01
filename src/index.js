@@ -258,6 +258,189 @@ async function envoyerEmail(env, { de, deNom, a, aNom, objet, html, repondreA })
 __name(envoyerEmail, "envoyerEmail");
 __name2(envoyerEmail, "envoyerEmail");
 __name22(envoyerEmail, "envoyerEmail");
+var octets = (s) => typeof s === "string" ? new TextEncoder().encode(s) : s;
+var hexa = (b) => [...new Uint8Array(b)].map((x) => x.toString(16).padStart(2, "0")).join("");
+async function sha256Hexa(donnees) {
+  return hexa(await crypto.subtle.digest("SHA-256", octets(donnees)));
+}
+async function hmacOctets(cle, donnees) {
+  const k = await crypto.subtle.importKey("raw", octets(cle), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+  return new Uint8Array(await crypto.subtle.sign("HMAC", k, octets(donnees)));
+}
+function sesActif(env) {
+  return !!(env.AWS_ACCESS_KEY_ID && env.AWS_SECRET_ACCESS_KEY);
+}
+// Signature AWS Signature Version 4 (requête JSON, sans paramètres de requête).
+async function awsEnTetes(env, { service, region, hote, chemin, methode = "POST", corps = "", quand = /* @__PURE__ */ new Date() }) {
+  const amzDate = quand.toISOString().replace(/[:-]|\.\d{3}/g, "");
+  const jour = amzDate.slice(0, 8);
+  const empreinte = await sha256Hexa(corps);
+  const signes = "content-type;host;x-amz-content-sha256;x-amz-date";
+  const canonique = [
+    methode,
+    chemin,
+    "",
+    `content-type:application/json
+host:${hote}
+x-amz-content-sha256:${empreinte}
+x-amz-date:${amzDate}
+`,
+    signes,
+    empreinte
+  ].join("\n");
+  const portee = `${jour}/${region}/${service}/aws4_request`;
+  const aSigner = ["AWS4-HMAC-SHA256", amzDate, portee, await sha256Hexa(canonique)].join("\n");
+  let k = await hmacOctets("AWS4" + env.AWS_SECRET_ACCESS_KEY, jour);
+  for (const p of [region, service, "aws4_request"]) k = await hmacOctets(k, p);
+  const signature = hexa(await hmacOctets(k, aSigner));
+  return {
+    "content-type": "application/json",
+    "x-amz-content-sha256": empreinte,
+    "x-amz-date": amzDate,
+    authorization: `AWS4-HMAC-SHA256 Credential=${env.AWS_ACCESS_KEY_ID}/${portee}, SignedHeaders=${signes}, Signature=${signature}`
+  };
+}
+// Envoi d'un email par Amazon SES (API v2). Lève une erreur avec .statut si SES refuse.
+async function envoyerSes(env, { de, deNom, a, objet, html, entetes = [] }) {
+  const region = (env.AWS_REGION || "eu-west-3").trim();
+  const hote = `email.${region}.amazonaws.com`;
+  const chemin = "/v2/email/outbound-emails";
+  const nom = String(deNom || "").replace(/[<>"]/g, "");
+  const corps = JSON.stringify({
+    FromEmailAddress: nom ? `${nom} <${de}>` : de,
+    Destination: { ToAddresses: [a] },
+    Content: { Simple: {
+      Subject: { Data: objet, Charset: "UTF-8" },
+      Body: { Html: { Data: html, Charset: "UTF-8" } },
+      ...entetes.length ? { Headers: entetes } : {}
+    } }
+  });
+  const res = await fetch(`https://${hote}${chemin}`, {
+    method: "POST",
+    headers: await awsEnTetes(env, { service: "ses", region, hote, chemin, corps }),
+    body: corps,
+    signal: AbortSignal.timeout(2e4)
+  });
+  const texte = await res.text();
+  if (!res.ok) {
+    let msg = texte;
+    try {
+      msg = JSON.parse(texte).message || texte;
+    } catch {
+    }
+    const e = new Error(`Amazon SES → ${res.status} ${String(msg).slice(0, 300)}`);
+    e.statut = res.status;
+    throw e;
+  }
+  return JSON.parse(texte || "{}").MessageId || "ses";
+}
+async function jetonDesabo(env, email) {
+  return hexa(await hmacOctets(`desabo:${env.CLE_TEST || "adamecom"}`, String(email).trim().toLowerCase())).slice(0, 32);
+}
+async function lienDesabo(env, email) {
+  const origine = (env.APP_ORIGINE || "https://app.adam-ecom.online").replace(/\/$/, "");
+  return `${origine}/desabo?e=${encodeURIComponent(email)}&s=${await jetonDesabo(env, email)}`;
+}
+async function assurerDesaboSchema(db) {
+  await db.prepare("CREATE TABLE IF NOT EXISTS newsletter_desabo (email TEXT PRIMARY KEY, quand TEXT NOT NULL)").run();
+}
+// Page publique de désinscription. GET : bouton de confirmation (les antivirus qui
+// ouvrent les liens ne désinscrivent personne). POST : désinscription en un clic
+// (en-tête List-Unsubscribe-Post de Gmail) ou bouton.
+async function pageDesabo(env, request, url) {
+  const email = String(url.searchParams.get("e") || "").trim().toLowerCase();
+  const valide = email && url.searchParams.get("s") === await jetonDesabo(env, email);
+  const page = (texte, bouton) => new Response(`<!doctype html><html lang="fr"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1"><title>D\xE9sinscription \xB7 AdamEcom</title></head>
+<body style="margin:0;background:#F4F1EA;font:16px/1.6 Helvetica,Arial,sans-serif;color:#1F1E1B;">
+<div style="max-width:480px;margin:60px auto;padding:32px 24px;background:#fff;border:1px solid #E5E0D4;border-radius:12px;text-align:center;">
+<h1 style="font-size:22px;margin:0 0 12px;">Newsletter AdamEcom</h1><p style="margin:0 0 20px;">${texte}</p>${bouton ? `<form method="post">
+<button style="background:#F5C518;border:0;border-radius:6px;padding:14px 26px;font:700 15px Helvetica,Arial,sans-serif;cursor:pointer;">Confirmer la d\xE9sinscription</button></form>` : ""}
+</div></body></html>`, { headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" } });
+  if (!valide) return page("Ce lien de d\xE9sinscription n'est pas valide.", false);
+  if (request.method !== "POST") return page(`Ne plus recevoir les nouveaux articles \xE0 l'adresse <b>${echapper(email)}</b> ?`, true);
+  await assurerDesaboSchema(env.DB);
+  await env.DB.prepare("INSERT OR IGNORE INTO newsletter_desabo (email, quand) VALUES (?, ?)").bind(email, (/* @__PURE__ */ new Date()).toISOString()).run();
+  if (env.BREVO_API_KEY) {
+    await brevo(env, `/contacts/${encodeURIComponent(email)}`, { method: "PUT", body: JSON.stringify({ emailBlacklisted: true }) }).catch((e) => console.error("Brevo d\xE9sabo :", e.message));
+  }
+  return page("C'est fait. Vous ne recevrez plus la newsletter.", false);
+}
+var SES_PAR_MINUTE = 15;
+// Envoi progressif d'un article par Amazon SES : 15 contacts de la liste Brevo par minute.
+async function newsletterSesEtape(env) {
+  if (!sesActif(env)) return;
+  const db = env.DB;
+  const maintenant = (/* @__PURE__ */ new Date()).toISOString();
+  const ligne = await db.prepare("SELECT * FROM newsletter_envois WHERE statut='ses_envoi' ORDER BY maj_le LIMIT 1").first().catch(() => null);
+  if (!ligne) return;
+  const prise = await db.prepare(`UPDATE newsletter_envois SET verrou_jusqua=?, maj_le=?
+    WHERE guid=? AND statut='ses_envoi' AND (verrou_jusqua IS NULL OR verrou_jusqua < ?)`).bind(new Date(Date.now() + 3 * 60 * 1e3).toISOString(), maintenant, ligne.guid, maintenant).run();
+  if (!prise.meta.changes) return;
+  let offset = ligne.ses_offset || 0, envoyes = ligne.ses_envoyes || 0, erreurs = ligne.ses_erreurs || 0;
+  // attente : minutes avant le prochain essai (problème de configuration, pause).
+  const finir = (statut, erreur, attente = 0) => db.prepare(`UPDATE newsletter_envois SET ses_offset=?, ses_envoyes=?, ses_erreurs=?, statut=?, erreur=?,
+    maj_le=?, verrou_jusqua=?${statut === "envoyee" ? ", envoyee_le=COALESCE(envoyee_le, ?)" : ""} WHERE guid=?`).bind(
+    offset, envoyes, erreurs, statut, erreur, (/* @__PURE__ */ new Date()).toISOString(),
+    attente ? new Date(Date.now() + attente * 60 * 1e3).toISOString() : null,
+    ...statut === "envoyee" ? [(/* @__PURE__ */ new Date()).toISOString()] : [],
+    ligne.guid
+  ).run();
+  try {
+    if (!await emailAutorise(env, "blog_newsletter")) {
+      await finir("ses_envoi", "Mod\xE8le \xAB Newsletter d'un nouvel article \xBB en pause : envoi suspendu.", 30);
+      return;
+    }
+    const listeId = ligne.ses_liste || (await listeDestinataires(env)).id;
+    const { contacts = [] } = await brevo(env, `/contacts/lists/${listeId}/contacts?limit=${SES_PAR_MINUTE}&offset=${offset}&sort=asc`);
+    await assurerDesaboSchema(db);
+    const emails = contacts.map((c) => String(c.email || "").trim().toLowerCase()).filter(Boolean);
+    const desabo = new Set(emails.length ? (await tous2(db, `SELECT email FROM newsletter_desabo WHERE email IN (${emails.map(() => "?").join(",")})`, ...emails)).map((r) => r.email) : []);
+    const article = { titre: ligne.titre, lien: ligne.lien, extrait: ligne.extrait || "", image: ligne.image || null, date: ligne.date_article || null };
+    for (const c of contacts) {
+      const email = String(c.email || "").trim().toLowerCase();
+      if (email && !c.emailBlacklisted && !desabo.has(email)) {
+        const lien = await lienDesabo(env, email);
+        try {
+          await envoyerSes(env, {
+            de: env.SENDER_EMAIL,
+            deNom: env.SENDER_NAME || "AdamEcom",
+            a: email,
+            objet: String(ligne.titre).slice(0, 200),
+            html: construireEmail(env, article).replace("{{ unsubscribe }}", echapper(lien)),
+            entetes: [
+              { Name: "List-Unsubscribe", Value: `<${lien}>` },
+              { Name: "List-Unsubscribe-Post", Value: "List-Unsubscribe=One-Click" }
+            ]
+          });
+          envoyes++;
+        } catch (e) {
+          // Compte non validé, domaine non vérifié, quota atteint : on s'arrête sans
+          // avancer, pour reprendre au même contact une fois le problème réglé.
+          if (e.statut === 429 || e.statut >= 500 || /not verified|not authorized|suspended|Sending paused|security token|signature/i.test(e.message)) {
+            await finir("ses_envoi", e.message, e.statut === 429 || e.statut >= 500 ? 2 : 30);
+            await noterIncident(db, "newsletter", ligne.titre, e.message);
+            return;
+          }
+          erreurs++;
+          await noterIncident(db, "newsletter", `${ligne.titre} → ${email}`, e.message);
+        }
+      }
+      offset++;
+    }
+    if (contacts.length < SES_PAR_MINUTE) {
+      await finir("envoyee", null);
+      await marquerTraite(db, DOMAINE2, ligne.guid);
+      await noterEnvoi(env, "blog_newsletter", `${envoyes} contact(s) via Amazon SES`, ligne.titre, "envoy\xE9", erreurs ? `${erreurs} erreur(s)` : null);
+    } else {
+      await finir("ses_envoi", null);
+    }
+  } catch (e) {
+    await finir("ses_envoi", String(e.message).slice(0, 500), 5);
+    await noterIncident(db, "newsletter", ligne.titre, e.message);
+  }
+}
+__name(newsletterSesEtape, "newsletterSesEtape");
 var jetonEnCache = null;
 var oublierJetonShopify = /* @__PURE__ */ __name22(() => {
   jetonEnCache = null;
@@ -754,6 +937,10 @@ async function assurerNewsletterSchema(db) {
     verrou_jusqua TEXT
   )`).run();
   await db.prepare("CREATE INDEX IF NOT EXISTS idx_newsletter_envois_statut ON newsletter_envois(statut, maj_le)").run();
+  for (const col of ["ses_liste INTEGER", "ses_offset INTEGER", "ses_envoyes INTEGER", "ses_erreurs INTEGER", "extrait TEXT", "image TEXT", "date_article TEXT"]) {
+    await db.prepare(`ALTER TABLE newsletter_envois ADD COLUMN ${col}`).run().catch(() => {
+    });
+  }
 }
 __name(assurerNewsletterSchema, "assurerNewsletterSchema");
 __name2(assurerNewsletterSchema, "assurerNewsletterSchema");
@@ -968,14 +1155,14 @@ async function executer2(env) {
     const verrou = new Date(Date.now() + 10 * 60 * 1e3).toISOString();
     const prise = await db.prepare(`UPDATE newsletter_envois
       SET verrou_jusqua=?, essais=essais+1, maj_le=?
-      WHERE guid=? AND statut!='envoyee' AND (verrou_jusqua IS NULL OR verrou_jusqua < ?)`).bind(verrou, maintenant, a.guid, maintenant).run();
+      WHERE guid=? AND statut NOT IN ('envoyee','ses_envoi') AND (verrou_jusqua IS NULL OR verrou_jusqua < ?)`).bind(verrou, maintenant, a.guid, maintenant).run();
     if (!prise.meta.changes) {
       log(`D\xE9j\xE0 pris en charge par une autre ex\xE9cution : ${a.titre}`);
       continue;
     }
     try {
       let ligne = await db.prepare("SELECT * FROM newsletter_envois WHERE guid=?").bind(a.guid).first();
-      if (ligne.campagne_id) {
+      if (ligne.campagne_id && ligne.campagne_id !== "ses") {
         const etat = await etatCampagneBrevo(env, ligne.campagne_id);
         if (etat === "sent") {
           await finaliserNewsletter(db, ligne, a, liste);
@@ -988,6 +1175,19 @@ async function executer2(env) {
           log(`Campagne ${ligne.campagne_id} toujours en cours chez Brevo (${etat}).`);
           continue;
         }
+      }
+      if (sesActif(env)) {
+        if (!await emailAutorise(env, "blog_newsletter")) {
+          await noterEnvoi(env, "blog_newsletter", "Amazon SES", a.titre, "bloqu\xE9", "mod\xE8le en pause");
+          await db.prepare("UPDATE newsletter_envois SET verrou_jusqua=NULL WHERE guid=?").bind(a.guid).run();
+          continue;
+        }
+        await db.prepare(`UPDATE newsletter_envois
+          SET statut='ses_envoi', campagne_id='ses', ses_liste=?, ses_offset=COALESCE(ses_offset,0), ses_envoyes=COALESCE(ses_envoyes,0),
+            ses_erreurs=COALESCE(ses_erreurs,0), extrait=?, image=?, date_article=?, destinataires=?, erreur=NULL, maj_le=?, verrou_jusqua=NULL
+          WHERE guid=?`).bind(liste.id, a.extrait || "", a.image || null, a.date || null, liste.contacts, (/* @__PURE__ */ new Date()).toISOString(), a.guid).run();
+        log(`Envoi par Amazon SES programm\xE9 \u2014 \xAB ${a.titre} \xBB \u2014 ${liste.contacts} contacts, ${SES_PAR_MINUTE} par minute`);
+        continue;
       }
       if (!ligne.campagne_id) {
         const { id } = await brevo(env, "/emailCampaigns", {
@@ -6649,6 +6849,7 @@ async function pageNewsletter(env, url, message) {
   ]);
   const ok = exec?.statut === "ok";
   const muet = exec && Date.now() - new Date(exec.quand).getTime() > 9e5 * 3;
+  const envoisSes = sesActif(env) ? await tous2(env.DB, "SELECT titre,lien,statut,destinataires,ses_envoyes,ses_erreurs,erreur,maj_le,envoyee_le FROM newsletter_envois WHERE campagne_id='ses' ORDER BY maj_le DESC LIMIT 10").catch(() => []) : [];
   const suivies = camps.map((c) => stats.get(String(c.id))).filter(Boolean);
   const livres = suivies.reduce((t, s) => t + s.livres, 0);
   const ouvreurs = suivies.reduce((t, s) => t + s.ouvreurs, 0);
@@ -6700,9 +6901,20 @@ async function pageNewsletter(env, url, message) {
   </div></section>
 
   <div class="note"><b>Comment \xE7a marche.</b> Toutes les 15 minutes, l'application lit le flux de votre
-    blog. D\xE8s qu'un article y appara\xEEt, il part en campagne Brevo vers votre liste.<br>
+    blog. D\xE8s qu'un article y appara\xEEt, ${sesActif(env) ? `il part par Amazon SES vers chaque contact de votre liste Brevo (${SES_PAR_MINUTE} par minute), avec un lien de d\xE9sinscription.` : "il part en campagne Brevo vers votre liste."}<br>
     <span class="sec">Flux : <a href="${echapper(env.FEED_URL || "")}" target="_blank" rel="noopener">${echapper(env.FEED_URL || "non configur\xE9")}</a>
     \xB7 liste ${echapper(env.BREVO_LIST || "\u2014")} \xB7 exp\xE9diteur ${echapper(env.SENDER_EMAIL || "\u2014")}</span></div>
+
+  ${envoisSes.length ? `<section><h2>Envois Amazon SES</h2>${tableauHtml(
+    [{ nom: "Article" }, { nom: "Envoy\xE9s", classe: "num" }, { nom: "Erreurs", classe: "num" }, { nom: "\xC9tat" }, { nom: "Mis \xE0 jour", classe: "nowrap" }],
+    envoisSes.map((e) => `<tr><td><b>${echapper(e.titre || "\u2014")}</b>${e.lien ? `<br><a class="sec" href="${echapper(e.lien)}" target="_blank" rel="noopener">voir l'article \u2192</a>` : ""}</td>
+      <td class="num">${e.ses_envoyes ?? 0} / ${e.destinataires ?? "?"}</td>
+      <td class="num">${e.ses_erreurs ?? 0}</td>
+      <td>${e.statut === "envoyee" ? "termin\xE9" : "en cours"}${e.erreur ? `<div class="err">${echapper(e.erreur).slice(0, 200)}</div>` : ""}</td>
+      <td class="nowrap">${dateFr2(e.envoyee_le || e.maj_le)}</td></tr>`),
+    "",
+    "tab-ses"
+  )}</section>` : ""}
 
   <section><h2>Articles envoy\xE9s</h2>${tableauHtml(
     [
@@ -11348,7 +11560,7 @@ var index_default = {
         radarModeAuto(env.DB).then((auto) => auto ? lancer("radar", executerRadar, env) : null)
       ]));
     } else {
-      ctx.waitUntil(Promise.all([lancer("calendly", executer, env), smtpTestEnAttente(env), radarEnvoisProgrammes(env), radarContactsEnAttente(env), radarQualiteEnAttente(env), radarRechercheEtape(env)]));
+      ctx.waitUntil(Promise.all([lancer("calendly", executer, env), smtpTestEnAttente(env), radarEnvoisProgrammes(env), radarContactsEnAttente(env), radarQualiteEnAttente(env), radarRechercheEtape(env), newsletterSesEtape(env)]));
     }
   },
   // Déclenchement manuel, pratique pour tester sans attendre la planification.
@@ -11364,6 +11576,7 @@ var index_default = {
       const r = await finAutorisation(env, code, url.origin);
       return Response.redirect(r.ok ? `${base}&gok=1` : `${base}&err=${encodeURIComponent(r.erreur)}`, 302);
     }
+    if (url.pathname === "/desabo") return pageDesabo(env, request, url);
     if (url.pathname.startsWith("/r/")) {
       const r = await radarSuiviEmail(env, url);
       if (r) return r;
