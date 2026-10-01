@@ -8604,6 +8604,23 @@ async function radarEnregistrerContacts(db, prospectId, domaine, htmlAccueil) {
 }
 __name(radarEnregistrerContacts, "radarEnregistrerContacts");
 __name2(radarEnregistrerContacts, "radarEnregistrerContacts");
+function radarRacineBoutique(domaine) {
+  const parties = String(domaine || "").toLowerCase().replace(/^(www|fr|shop|boutique|store)\./, "").split(".");
+  if (parties.length < 2) return null;
+  const racine = parties.length >= 3 && parties.slice(-2).join(".") === "myshopify.com" ? parties[parties.length - 3] : parties[0];
+  return racine && racine.length >= 4 ? racine : null;
+}
+async function radarMemeBoutiqueConnue(db, domaine, pageId) {
+  const racine = radarRacineBoutique(domaine);
+  if (!racine) return false;
+  const plages = ["", "www.", "fr.", "shop.", "boutique.", "store."].map((p) => p + racine);
+  const r = await db.prepare(`SELECT 1 FROM radar_prospects WHERE page_id<>? AND domaine<>? AND (${plages.map(() => "(domaine>? AND domaine<?)").join(" OR ")}) LIMIT 1`).bind(
+    pageId,
+    domaine,
+    ...plages.flatMap((p) => [p + ".", p + "/"])
+  ).first();
+  return !!r;
+}
 async function radarAnalyserAnnonceur(env, annonceur, reg) {
   const db = env.DB;
   const maintenant = (/* @__PURE__ */ new Date()).toISOString();
@@ -8613,6 +8630,7 @@ async function radarAnalyserAnnonceur(env, annonceur, reg) {
     annonceur.pageId
   ).first();
   if (doublon) return { analyse: false, raison: "doublon_domaine" };
+  if (await radarMemeBoutiqueConnue(db, annonceur.domaine, annonceur.pageId)) return { analyse: false, raison: "doublon_boutique" };
   try {
     const site = await radarChargerSite(annonceur.domaine);
     const shopify2 = radarDetecterShopify(site.html, site.entetes);
@@ -8754,10 +8772,11 @@ async function radarAnalyserAnnonceur(env, annonceur, reg) {
 }
 __name(radarAnalyserAnnonceur, "radarAnalyserAnnonceur");
 __name2(radarAnalyserAnnonceur, "radarAnalyserAnnonceur");
-async function executerRadar(env) {
+async function executerRadar(env, objectifJour) {
   await assurerRadarSchema(env.DB);
   const db = env.DB;
   const reg = await radarReglages(db);
+  if (objectifJour) reg.parJour = objectifJour;
   const motCle = await db.prepare(`SELECT * FROM radar_motscles WHERE actif=1
     ORDER BY CASE WHEN priorite='haute' THEN 0 ELSE 1 END,COALESCE(dernier_passage,'') ASC,id ASC LIMIT 1`).first();
   if (!motCle) return { bloque: "Aucun mot-cl\xE9 actif" };
@@ -8960,13 +8979,14 @@ async function radarRechercheEtape(env) {
       etat.verrou = null;
       await radarEcrireRecherche(db, etat);
     }, "terminer");
+    const objectif = (etat.depart || 0) + reg.parJour;
     etat.trouves = await radarProposesAujourdhui(db);
-    if (etat.trouves >= reg.parJour || etat.passes >= etat.max) return await terminer();
+    if (etat.trouves >= objectif || etat.passes >= etat.max) return await terminer();
     etat.verrou = new Date(Date.now() + 4 * 6e4).toISOString();
     await radarEcrireRecherche(db, etat);
     const debut = Date.now();
     try {
-      const r = await executerRadar(env);
+      const r = await executerRadar(env, objectif);
       if (r.bloque) {
         etat.erreur = r.bloque;
         return await terminer();
@@ -8981,7 +9001,7 @@ async function radarRechercheEtape(env) {
     etat.passes += 1;
     etat.verrou = null;
     etat.trouves = await radarProposesAujourdhui(db);
-    if (etat.trouves >= reg.parJour || etat.passes >= etat.max || etat.erreurs >= 3) return await terminer();
+    if (etat.trouves >= objectif || etat.passes >= etat.max || etat.erreurs >= 3) return await terminer();
     await radarEcrireRecherche(db, etat);
   } catch (e) {
     console.error("recherche manuelle radar", e?.message || e);
@@ -9391,11 +9411,11 @@ async function pageRadar(env, url, message) {
       env.DB,
       `SELECT * FROM radar_prospects
        WHERE statut NOT IN ('contact\xE9','r\xE9pondu','rdv','client','non pertinent','d\xE9j\xE0 optimis\xE9')
-         AND etape='analyse' AND presente_le IS NOT NULL
+         AND etape='analyse' AND presente_le=?
          AND (?=0 OR shopify_statut='oui')
-       ORDER BY presente_le DESC, score DESC, id DESC LIMIT ?`,
-      reg.shopifyObligatoire ? 1 : 0,
-      reg.parJour
+       ORDER BY score DESC, id DESC LIMIT 50`,
+      (/* @__PURE__ */ new Date()).toISOString().slice(0, 10),
+      reg.shopifyObligatoire ? 1 : 0
     ),
     tous2(env.DB, "SELECT quand,statut,message,duree_ms FROM executions WHERE domaine='radar' ORDER BY quand DESC LIMIT 1")
   ]);
@@ -9771,7 +9791,7 @@ async function pageRadar(env, url, message) {
       ${sourceDisponible ? `<div class="jr-recherche">
         ${rechercheEnCours ? `<meta http-equiv="refresh" content="30">
           <button type="button" disabled>Recherche en cours\u2026</button>
-          <span>${recherche.passes} passage(s) sur ${recherche.max} \xB7 ${recherche.trouves} / ${reg.parJour} prospects du jour trouv\xE9s. La page se met \xE0 jour toute seule.</span>` : `<form method="POST" action="?cle=${cle}&page=radar&action=radar_recherche"
+          <span>${recherche.passes} passage(s) sur ${recherche.max} \xB7 ${Math.max(0, recherche.trouves - (recherche.depart || 0))} / ${reg.parJour} nouveaux prospects trouv\xE9s. La page se met \xE0 jour toute seule.</span>` : `<form method="POST" action="?cle=${cle}&page=radar&action=radar_recherche"
             onsubmit="var b=this.querySelector('button');if(b.disabled)return false;b.disabled=true;b.textContent='Lancement\u2026';">
             <button type="submit">\u{1F50E} Donnez-moi les prospects du jour</button></form>
           <span>${recherche?.fin ? `Derni\xE8re recherche ${depuis(recherche.fin)} : ${Math.max(0, recherche.trouves - (recherche.depart || 0))} nouveau(x) prospect(s)${recherche.erreur ? ` \xB7 arr\xEAt\xE9e : ${echapper(recherche.erreur.replace(/[.\s]+$/, ""))}` : ""}.` : ""} ${modeAuto ? "Le radar cherche aussi tout seul toutes les 15 minutes." : "Le radar ne cherche que quand vous cliquez."}</span>`}
