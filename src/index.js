@@ -9171,7 +9171,7 @@ async function radarCompleterJour(db, reg, exigerIa = false) {
 }
 __name(radarCompleterJour, "radarCompleterJour");
 __name2(radarCompleterJour, "radarCompleterJour");
-var RADAR_RECHERCHE_PASSES_MAX = 30;
+var RADAR_RECHERCHE_PASSES_MAX = 400;
 function radarEtatRecherche(reg) {
   try {
     return reg?.brut?.recherche_manuelle ? JSON.parse(reg.brut.recherche_manuelle) : null;
@@ -9226,6 +9226,7 @@ async function radarRechercheEtape(env) {
         return await terminer();
       }
       etat.dernier = radarResumeCollecte(r);
+      etat.erreurs = 0;
       await noterExecution(db, "radar", Date.now() - debut, "ok", etat.dernier);
     } catch (e) {
       etat.erreurs = (etat.erreurs || 0) + 1;
@@ -9464,6 +9465,7 @@ var RADAR_JR_CSS = `<style>
 .jr-ia li{margin:2px 0}
 .jr-recherche button{font:inherit;font-size:14px;font-weight:600;padding:10px 18px;border-radius:9px;border:0;background:var(--encre);color:var(--surface);cursor:pointer}
 .jr-recherche button:disabled{opacity:.6;cursor:default}
+.jr-recherche button.discret{background:transparent;color:var(--doux);border:1px solid var(--trait-fort);font-weight:500;padding:8px 14px}
 .jr-radar-actions a,.jr-radar-actions button{font:inherit;font-size:12.5px;padding:5px 11px;border-radius:7px;border:1px solid var(--trait-fort);background:var(--surface);color:var(--encre);text-decoration:none;cursor:pointer;white-space:nowrap}
 .jr-radar-actions a:hover,.jr-radar-actions button:hover{background:var(--surface3)}
 .jr-intro{margin:-4px 0 14px;font-size:13.5px;color:var(--gris)}
@@ -10030,7 +10032,8 @@ async function pageRadar(env, url, message) {
       ${sourceDisponible ? `<div class="jr-recherche">
         ${rechercheEnCours ? `<meta http-equiv="refresh" content="30">
           <button type="button" disabled>Recherche en cours\u2026</button>
-          <span>${recherche.passes} passage(s) sur ${recherche.max} \xB7 ${Math.max(0, recherche.trouves - (recherche.depart || 0))} / ${reg.parJour} nouveaux prospects trouv\xE9s. La page se met \xE0 jour toute seule.</span>` : `<form method="POST" action="?cle=${cle}&page=radar&action=radar_recherche"
+          <form method="POST" action="?cle=${cle}&page=radar&action=radar_recherche_stop"><button type="submit" class="discret">Arr\xEAter</button></form>
+          <span>${recherche.passes} passage(s) \xB7 ${Math.max(0, recherche.trouves - (recherche.depart || 0))} / ${reg.parJour} nouveaux prospects trouv\xE9s. La recherche continue jusqu'\xE0 trouver vos prospects du jour. La page se met \xE0 jour toute seule.</span>` : `<form method="POST" action="?cle=${cle}&page=radar&action=radar_recherche"
             onsubmit="var b=this.querySelector('button');if(b.disabled)return false;b.disabled=true;b.textContent='Lancement\u2026';">
             <button type="submit">\u{1F50E} Donnez-moi les prospects du jour</button></form>
           <span>${recherche?.fin ? `Derni\xE8re recherche ${depuis(recherche.fin)} : ${Math.max(0, recherche.trouves - (recherche.depart || 0))} nouveau(x) prospect(s)${recherche.erreur ? ` \xB7 arr\xEAt\xE9e : ${echapper(recherche.erreur.replace(/[.\s]+$/, ""))}` : ""}.` : ""} ${modeAuto ? "Le radar cherche aussi tout seul toutes les 15 minutes." : "Le radar ne cherche que quand vous cliquez."}</span>`}
@@ -10816,6 +10819,11 @@ async function application(env, url, request) {
           await noterExecution(env.DB, "radar", Date.now() - debut, "erreur", String(e.message || e).slice(0, 500));
           return retour("&err=" + encodeURIComponent(String(e.message || e)));
         }
+      }
+      if (action === "radar_recherche_stop") {
+        const etat = radarEtatRecherche(await radarReglages(env.DB));
+        if (etat && !etat.fin) await radarEcrireRecherche(env.DB, { ...etat, fin: (/* @__PURE__ */ new Date()).toISOString(), verrou: null, erreur: "arr\xEAt\xE9e par vous" });
+        return retour("");
       }
       if (action === "radar_recherche") {
         const r = await radarDemarrerRecherche(env);
