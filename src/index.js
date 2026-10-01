@@ -1528,6 +1528,837 @@ async function annulerFacture(env, numero, motif, prevenirClient) {
 __name(annulerFacture, "annulerFacture");
 __name2(annulerFacture, "annulerFacture");
 __name22(annulerFacture, "annulerFacture");
+// ─── Devis ───────────────────────────────────────────────────────────────
+// Même charte que la facture. Le contenu est collé en texte libre : les lignes
+// commençant par « - », « • », « ✓ » ou « 1. » deviennent des puces, les lignes
+// terminées par « : » ou en majuscules deviennent des intertitres, et un prix en
+// fin de ligne (« … — 150 € ») est aligné à droite.
+var devisSchemaOk = false;
+async function assurerDevisSchema(db) {
+  if (devisSchemaOk) return;
+  await db.prepare(`CREATE TABLE IF NOT EXISTS devis (
+    numero          INTEGER PRIMARY KEY AUTOINCREMENT,
+    date_devis      TEXT NOT NULL,
+    validite_jours  INTEGER NOT NULL DEFAULT 30,
+    client_nom      TEXT NOT NULL,
+    client_societe  TEXT,
+    client_email    TEXT NOT NULL,
+    client_telephone TEXT,
+    client_adresse  TEXT,
+    titre           TEXT NOT NULL,
+    contenu         TEXT NOT NULL,
+    montant         REAL NOT NULL,
+    acompte_pct     INTEGER NOT NULL DEFAULT 50,
+    delai_livraison TEXT NOT NULL,
+    conditions      TEXT,
+    statut          TEXT NOT NULL DEFAULT 'brouillon',
+    envoye_le       TEXT,
+    facture_numero  INTEGER,
+    jeton           TEXT NOT NULL,
+    cree_le         TEXT NOT NULL
+  )`).run();
+  for (const col of ["express_delai TEXT", "express_prix REAL"]) {
+    await db.prepare(`ALTER TABLE devis ADD COLUMN ${col}`).run().catch(() => {
+    });
+  }
+  devisSchemaOk = true;
+}
+__name22(assurerDevisSchema, "assurerDevisSchema");
+var DEVIS_PREMIER_NUMERO = 8754;
+var numeroDevis = /* @__PURE__ */ __name22((d) => String(d.numero), "numeroDevis");
+var finValiditeDevis = /* @__PURE__ */ __name22((d) => {
+  const t = new Date(String(d.date_devis).slice(0, 10) + "T00:00:00Z");
+  t.setUTCDate(t.getUTCDate() + Number(d.validite_jours || 30));
+  return t.toISOString();
+}, "finValiditeDevis");
+var PUCE_DEVIS = /^\s*(?:[-–—•*·▪►✓✔✅☑→>]|\d{1,2}[.)])\s+/;
+var PRIX_DEVIS = /\s*(?:[:=\-–—|]|\.{2,})\s*(\d[\d\s .,]*)\s*(?:€|euros?|eur)\s*(?:HT|TTC)?\s*$/i;
+function formaterContenuDevis(texte) {
+  const lignes = String(texte || "").replace(/\r/g, "").split("\n");
+  const blocs = [];
+  let liste = null;
+  const fermer = /* @__PURE__ */ __name22(() => {
+    if (liste) blocs.push(`<ul class="inclus">${liste.join("")}</ul>`);
+    liste = null;
+  }, "fermer");
+  const ligneHtml = /* @__PURE__ */ __name22((t) => {
+    let prix = "";
+    const m = t.match(PRIX_DEVIS);
+    if (m && m.index > 0) {
+      prix = `<span class="prix">${echapper(m[1].trim())} \u20AC</span>`;
+      t = t.slice(0, m.index);
+    }
+    const deux = t.match(/^([^:]{2,60}?)\s:\s*(.+)$/) || t.match(/^([^:]{2,60}?):\s+(.+)$/);
+    const texteHtml = deux ? `<b>${echapper(deux[1].trim())}</b> : ${echapper(deux[2].trim())}` : echapper(t);
+    return `<span class="ltxt">${texteHtml}</span>${prix}`;
+  }, "ligneHtml");
+  for (const brute of lignes) {
+    const l = brute.trim();
+    if (!l) {
+      fermer();
+      continue;
+    }
+    const lettres = l.replace(/[^A-Za-zÀ-ÿ]/g, "");
+    const titre = /^#{1,4}\s+/.test(l) || l.length <= 50 && /:\s*$/.test(l) && !PUCE_DEVIS.test(l) || lettres.length >= 4 && l.length <= 70 && lettres === lettres.toUpperCase() && !PUCE_DEVIS.test(l);
+    if (titre) {
+      fermer();
+      blocs.push(`<h4 class="intertitre">${echapper(l.replace(/^#{1,4}\s+/, "").replace(/\s*:\s*$/, ""))}</h4>`);
+      continue;
+    }
+    if (PUCE_DEVIS.test(l)) {
+      if (!liste) liste = [];
+      liste.push(`<li>${ligneHtml(l.replace(PUCE_DEVIS, ""))}</li>`);
+      continue;
+    }
+    fermer();
+    blocs.push(`<p class="para">${ligneHtml(l)}</p>`);
+  }
+  fermer();
+  return blocs.join("\n");
+}
+__name22(formaterContenuDevis, "formaterContenuDevis");
+function gabaritDevis(d, env) {
+  const p = env._profil || {};
+  const num = numeroDevis(d);
+  const acompte = Math.round(Number(d.montant) * Number(d.acompte_pct || 0)) / 100;
+  const solde = Math.round((Number(d.montant) - acompte) * 100) / 100;
+  const eq = /* @__PURE__ */ __name22((c) => `position:absolute;width:46px;height:46px;border:6px solid ${JAUNE};${c}`, "eq");
+  const paiement = Number(d.acompte_pct) >= 100 ? "100 % \xE0 la signature du devis" : Number(d.acompte_pct) > 0 ? `${d.acompte_pct} % \xE0 la signature, solde \xE0 la livraison` : "100 % \xE0 la livraison";
+  return `<!doctype html><html lang="fr"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex,nofollow">
+<title>Devis n\xB0 ${num} \u2014 ${echapper(p.profil_nom || "AdamEcom")}</title>
+<style>
+  @page{size:A4;margin:14mm}
+  *{box-sizing:border-box}
+  body{margin:0;background:#E9E7E1;color:${NOIR};
+    font-family:"Helvetica Neue",Helvetica,Arial,system-ui,sans-serif;
+    font-size:15px;line-height:1.6;-webkit-font-smoothing:antialiased}
+  .feuille{position:relative;max-width:860px;margin:28px auto;background:#fff;
+    padding:56px 62px 46px;box-shadow:0 2px 26px rgba(0,0,0,.09)}
+  .eq1{${eq("top:20px;left:20px;border-right:0;border-bottom:0")}}
+  .eq2{${eq("top:20px;right:20px;border-left:0;border-bottom:0")}}
+  .eq3{${eq("bottom:20px;left:20px;border-right:0;border-top:0")}}
+  .eq4{${eq("bottom:20px;right:20px;border-left:0;border-top:0")}}
+  .logo{text-align:center;margin-bottom:38px}
+  .logo img{width:310px;max-width:70%;height:auto;display:inline-block}
+  .badge{display:inline-block;background:${NOIR};color:#fff;font-weight:800;
+    font-size:14px;letter-spacing:.05em;padding:9px 20px}
+  .parties{display:flex;gap:28px;margin-bottom:8px}
+  .partie{flex:1;min-width:0}
+  .partie.droite{text-align:right}
+  .corps{font-size:14.5px;line-height:1.85;margin-top:14px}
+  .corps .eti{color:${GRIS}}
+  .nom{font-weight:800;font-size:16px}
+  .adresse{white-space:pre-line}
+
+  .bande{background:${JAUNE};text-align:center;font-weight:800;font-size:12.5px;
+    letter-spacing:.18em;padding:12px;margin:38px 0 0}
+  .presta{font-weight:800;font-size:19px;margin:26px 0 14px;letter-spacing:-.01em}
+  .intertitre{margin:22px 0 8px;font-size:13px;font-weight:800;letter-spacing:.1em;text-transform:uppercase;
+    padding-bottom:6px;border-bottom:1px solid ${TRAIT}}
+  .para{margin:8px 0;font-size:15px;line-height:1.7}
+  ul.inclus{list-style:none;margin:6px 0 10px;padding:0}
+  ul.inclus li{position:relative;padding:7px 0 7px 30px;font-size:15px;line-height:1.6;
+    border-bottom:1px dashed ${TRAIT};display:flex;gap:16px;align-items:baseline}
+  ul.inclus li:last-child{border-bottom:0}
+  ul.inclus li::before{content:"";position:absolute;left:2px;top:12px;width:14px;height:14px;
+    background:${JAUNE};border-radius:3px}
+  ul.inclus li::after{content:"";position:absolute;left:6px;top:14px;width:4px;height:7px;
+    border:solid ${NOIR};border-width:0 2px 2px 0;transform:rotate(45deg)}
+  .ltxt{flex:1}
+  .prix{margin-left:auto;font-weight:700;white-space:nowrap;font-variant-numeric:tabular-nums}
+
+  .infos{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin:34px 0 0}
+  .info{border:1px solid ${TRAIT};border-radius:9px;padding:14px 16px}
+  .info .k{font-size:11.5px;font-weight:800;letter-spacing:.12em;color:${GRIS};text-transform:uppercase}
+  .info .v{font-weight:800;font-size:15.5px;margin-top:4px}
+
+  .express{display:flex;gap:16px;align-items:center;justify-content:space-between;margin:12px 0 0;
+    border:2px solid ${JAUNE};background:#FFFBE6;border-radius:9px;padding:14px 18px}
+  .express .k{font-size:11.5px;font-weight:800;letter-spacing:.12em;color:${GRIS};text-transform:uppercase}
+  .express .v{font-weight:700;font-size:15px;margin-top:3px}
+  .express .px{font-weight:800;font-size:18px;white-space:nowrap}
+  .totaux{margin:34px 0 0;display:flex;justify-content:flex-end}
+  .totaux table{border-collapse:collapse;min-width:320px}
+  .totaux td{padding:9px 0;font-size:15px}
+  .totaux td.l{color:${GRIS};padding-right:26px}
+  .totaux td.v{text-align:right;font-weight:700;font-variant-numeric:tabular-nums;white-space:nowrap}
+  .totaux tr.ttc td{border-top:2px solid ${NOIR};padding-top:13px;font-size:19px;font-weight:800}
+  .totaux tr.ac td{font-size:14px}
+
+  .conditions{margin:30px 0 0;font-size:13.5px;line-height:1.7;color:#3D3A33;white-space:pre-line;
+    background:#F7F5F0;border-radius:9px;padding:16px 20px}
+  .conditions b{display:block;font-size:11.5px;letter-spacing:.12em;color:${GRIS};margin-bottom:4px}
+
+
+  .pied{margin-top:42px;padding-top:20px;border-top:1px solid ${TRAIT};
+    text-align:center;font-weight:800;font-size:14px}
+  .mentions{margin-top:9px;text-align:center;font-size:11.5px;color:${GRIS};line-height:1.6}
+
+  .barre{position:fixed;top:14px;right:14px;display:flex;gap:8px}
+  .barre button{background:${JAUNE};color:${NOIR};font:700 14px/1 inherit;border:0;
+    padding:12px 20px;border-radius:8px;cursor:pointer}
+  .barre button.sec{background:#fff;border:1px solid ${TRAIT}}
+  body.pdf{background:#fff}
+  body.pdf .barre,body.pdf .eq1,body.pdf .eq2,body.pdf .eq3,body.pdf .eq4{display:none}
+  body.pdf .feuille{margin:0 auto;box-shadow:none;width:794px;max-width:none;padding:0 56px}
+
+  @media(max-width:760px){
+    body{font-size:14px}
+    .feuille{margin:0;padding:34px 20px 30px;box-shadow:none}
+    .eq1,.eq2,.eq3,.eq4{width:28px;height:28px;border-width:5px;top:12px;bottom:12px;left:12px;right:12px}
+    .eq1,.eq2{bottom:auto}.eq3,.eq4{top:auto}.eq1,.eq3{right:auto}.eq2,.eq4{left:auto}
+    .logo{margin-bottom:26px}.logo img{width:230px;max-width:66%}
+    .parties{flex-direction:column;gap:22px}
+    .partie.droite{text-align:left}
+    .badge{display:block;text-align:center;font-size:13px;padding:9px 12px}
+    .bande{letter-spacing:.1em;font-size:11.5px}
+    .infos{grid-template-columns:1fr}
+    .totaux{justify-content:stretch}.totaux table{width:100%;min-width:0}
+    .barre{position:static;padding:14px 20px 0}
+    .barre button{width:100%}
+  }
+  @media print{
+    body{background:#fff}
+    .feuille{margin:0;padding:0;box-shadow:none;max-width:none}
+    .barre{display:none}
+    .eq1,.eq2,.eq3,.eq4{display:none}
+    .infos,.totaux,.conditions,ul.inclus li{break-inside:avoid}
+  }
+</style></head><body>
+<div class="barre"><button onclick="telechargerPdf()">T\xE9l\xE9charger le PDF</button><button class="sec" onclick="window.print()">Imprimer</button></div>
+<div class="feuille">
+  <div class="eq1"></div><div class="eq2"></div><div class="eq3"></div><div class="eq4"></div>
+
+  <div class="logo"><img src="${echapper(/^https?:/.test(p.profil_logo || LOGO) ? "/logo-devis" : p.profil_logo)}" alt="${echapper(p.profil_nom || "AdamEcom")}"></div>
+
+  <div class="parties">
+    <div class="partie">
+      <span class="badge">DEVIS N\xB0 ${num}</span>
+      <div class="corps">
+        <span class="eti">Date</span> \xB7 <b>${dateFr(d.date_devis)}</b><br>
+        <span class="eti">Valable jusqu'au</span> \xB7 <b>${dateFr(finValiditeDevis(d))}</b><br>
+        <span class="nom">${echapper(p.profil_nom || "AdamEcom")}</span><br>
+        ${p.profil_activite ? `${echapper(p.profil_activite)}<br>` : ""}
+        ${p.profil_email ? `<span class="eti">Email</span> ${echapper(p.profil_email)}<br>` : ""}
+        ${p.profil_telephone ? `<span class="eti">T\xE9l.</span> ${echapper(p.profil_telephone)}<br>` : ""}
+        ${p.profil_site ? `<span class="eti">Site</span> ${echapper(p.profil_site)}` : ""}
+      </div>
+    </div>
+    <div class="partie droite">
+      <span class="badge">ADRESS\xC9 \xC0</span>
+      <div class="corps">
+        <span class="nom">${echapper(d.client_nom)}</span><br>
+        ${d.client_societe ? `${echapper(d.client_societe)}<br>` : ""}
+        ${d.client_adresse ? `<span class="adresse">${echapper(d.client_adresse)}</span><br>` : ""}
+        ${d.client_email ? `<span class="eti">Email</span> ${echapper(d.client_email)}` : ""}
+        ${d.client_telephone ? `<br><span class="eti">T\xE9l.</span> ${echapper(d.client_telephone)}` : ""}
+      </div>
+    </div>
+  </div>
+
+  <div class="bande">CE QUI EST INCLUS</div>
+  <div class="presta">${echapper(d.titre)}</div>
+  ${formaterContenuDevis(d.contenu)}
+
+  <div class="infos">
+    <div class="info"><div class="k">D\xE9lai de livraison</div><div class="v">${echapper(d.delai_livraison)}</div></div>
+    <div class="info"><div class="k">Paiement</div><div class="v">${paiement}</div></div>
+    <div class="info"><div class="k">Validit\xE9 du devis</div><div class="v">${Number(d.validite_jours || 30)} jours</div></div>
+  </div>
+  ${d.express_prix ? `<div class="express"><div><div class="k">Option \xB7 Livraison express</div>
+      <div class="v">Livraison en ${echapper(d.express_delai || "")} au lieu de ${echapper(d.delai_livraison)}</div></div>
+    <div class="px">+ ${euros(d.express_prix)}</div></div>` : ""}
+
+  <div class="totaux"><table>
+    <tr><td class="l">Sous-total</td><td class="v">${euros(d.montant)}</td></tr>
+    <tr><td class="l">TVA</td><td class="v">non applicable</td></tr>
+    <tr class="ttc"><td class="l">TOTAL TTC</td><td class="v">${euros(d.montant)}</td></tr>
+    ${Number(d.acompte_pct) > 0 && Number(d.acompte_pct) < 100 ? `
+    <tr class="ac"><td class="l">Acompte \xE0 la signature (${d.acompte_pct} %)</td><td class="v">${euros(acompte)}</td></tr>
+    <tr class="ac"><td class="l">Solde \xE0 la livraison</td><td class="v">${euros(solde)}</td></tr>` : ""}
+    ${d.express_prix ? `<tr class="ac"><td class="l">Total avec livraison express</td><td class="v">${euros(Number(d.montant) + Number(d.express_prix))}</td></tr>` : ""}
+  </table></div>
+
+  ${d.conditions ? `<div class="conditions"><b>CONDITIONS PARTICULI\xC8RES</b>${echapper(d.conditions)}</div>` : ""}
+
+  <div class="pied">${echapper(p.profil_remerciement || "Adam Ecom vous remercie pour votre confiance.")}</div>
+  <div class="mentions">
+    Devis n\xB0 ${num} \xB7 ${echapper(p.profil_nom || "AdamEcom")}${p.profil_site ? ` \xB7 ${echapper(p.profil_site)}` : ""}<br>
+    ${echapper(p.profil_mentions || "TVA non applicable \u2014 article 293 B du CGI. Paiement par virement bancaire.")}
+  </div>
+</div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js"><\/script>
+<script>
+function telechargerPdf(){
+  if(!window.html2pdf){ window.print(); return; }
+  document.body.classList.add('pdf'); window.scrollTo(0, 0);
+  return html2pdf().set({
+    margin:[12,0,12,0], filename:'Devis-${num}.pdf',
+    image:{type:'jpeg',quality:0.97},
+    html2canvas:{scale:2,useCORS:true,backgroundColor:'#ffffff'},
+    jsPDF:{unit:'mm',format:'a4',orientation:'portrait'},
+    pagebreak:{mode:['css','legacy'],avoid:['.infos','.totaux','.conditions','li','.intertitre']}
+  }).from(document.querySelector('.feuille')).save().then(function(){ document.body.classList.remove('pdf'); });
+}
+if(/[?&]telecharger=1/.test(location.search)){
+  window.addEventListener('load', function(){ setTimeout(telechargerPdf, 300); });
+}
+<\/script></body></html>`;
+}
+__name22(gabaritDevis, "gabaritDevis");
+var lireDevis = /* @__PURE__ */ __name22((db, numero) => db.prepare("SELECT * FROM devis WHERE numero = ?").bind(numero).first(), "lireDevis");
+var lireDevisParJeton = /* @__PURE__ */ __name22((db, jeton) => db.prepare("SELECT * FROM devis WHERE jeton = ?").bind(jeton).first(), "lireDevisParJeton");
+function champsDevis(form) {
+  const v = /* @__PURE__ */ __name22((k) => String(form.get(k) || "").trim(), "v");
+  const montant = Number(v("montant").replace(/[^\d,.]/g, "").replace(",", "."));
+  const acompte = Math.min(100, Math.max(0, Number.parseInt(v("acompte_pct") || "50", 10) || 0));
+  const validite = Math.min(365, Math.max(1, Number.parseInt(v("validite_jours") || "30", 10) || 30));
+  const c = {
+    date_devis: v("date_devis") || (/* @__PURE__ */ new Date()).toISOString().slice(0, 10),
+    validite_jours: validite,
+    client_nom: v("client_nom"),
+    client_societe: v("client_societe") || null,
+    client_email: v("client_email"),
+    client_telephone: v("client_telephone") || null,
+    client_adresse: v("client_adresse") || null,
+    titre: v("titre"),
+    contenu: v("contenu"),
+    montant,
+    acompte_pct: acompte,
+    delai_livraison: v("delai_livraison"),
+    conditions: v("conditions") || null,
+    express_delai: form.get("express") === "1" ? v("express_delai") || null : null,
+    express_prix: form.get("express") === "1" ? Number(v("express_prix").replace(/[^\d,.]/g, "").replace(",", ".")) || null : null
+  };
+  const erreurs = [];
+  if (!c.client_nom) erreurs.push("le nom du client");
+  if (c.client_email && !c.client_email.includes("@")) erreurs.push("un email valide (ou laissez le champ vide)");
+  if (form.get("express") === "1" && (!c.express_delai || !c.express_prix)) erreurs.push("le d\xE9lai et le tarif de la livraison express");
+  if (!c.titre) erreurs.push("le titre du projet");
+  if (!c.contenu) erreurs.push("ce qui est inclus");
+  if (!c.delai_livraison) erreurs.push("le d\xE9lai de livraison");
+  if (!Number.isFinite(montant) || montant <= 0) erreurs.push("un prix sup\xE9rieur \xE0 z\xE9ro");
+  return erreurs.length ? { erreur: `Il manque ${erreurs.join(", ")}.` } : { c };
+}
+__name22(champsDevis, "champsDevis");
+var COLONNES_DEVIS = ["date_devis", "validite_jours", "client_nom", "client_societe", "client_email", "client_telephone", "client_adresse", "titre", "contenu", "montant", "acompte_pct", "delai_livraison", "conditions", "express_delai", "express_prix"];
+async function creerDevis(env, form) {
+  await assurerDevisSchema(env.DB);
+  const { c, erreur } = champsDevis(form);
+  if (erreur) return { erreur };
+  const r = await env.DB.prepare(
+    `INSERT INTO devis (numero, ${COLONNES_DEVIS.join(", ")}, statut, jeton, cree_le)
+     SELECT MAX(?, COALESCE(MAX(numero), 0) + 1), ${COLONNES_DEVIS.map(() => "?").join(", ")}, 'brouillon', ?, ? FROM devis`
+  ).bind(DEVIS_PREMIER_NUMERO, ...COLONNES_DEVIS.map((k) => c[k]), nouveauJeton(), (/* @__PURE__ */ new Date()).toISOString()).run();
+  return { numero: r.meta.last_row_id };
+}
+__name22(creerDevis, "creerDevis");
+async function modifierDevis(env, numero, form) {
+  await assurerDevisSchema(env.DB);
+  const d = await lireDevis(env.DB, numero);
+  if (!d) return { erreur: "Devis introuvable." };
+  const { c, erreur } = champsDevis(form);
+  if (erreur) return { erreur };
+  await env.DB.prepare(`UPDATE devis SET ${COLONNES_DEVIS.map((k) => `${k}=?`).join(", ")} WHERE numero=?`).bind(...COLONNES_DEVIS.map((k) => c[k]), numero).run();
+  return { ok: true };
+}
+__name22(modifierDevis, "modifierDevis");
+async function statutDevis(env, numero, statut) {
+  await assurerDevisSchema(env.DB);
+  if (!["accept\xE9", "refus\xE9", "envoy\xE9", "brouillon"].includes(statut)) return { erreur: "Statut inconnu." };
+  const d = await lireDevis(env.DB, numero);
+  if (!d) return { erreur: "Devis introuvable." };
+  if (d.facture_numero) return { erreur: "Ce devis a d\xE9j\xE0 \xE9t\xE9 factur\xE9." };
+  await env.DB.prepare("UPDATE devis SET statut=? WHERE numero=?").bind(statut, numero).run();
+  return { ok: true };
+}
+__name22(statutDevis, "statutDevis");
+async function supprimerDevis(env, numero) {
+  await assurerDevisSchema(env.DB);
+  const d = await lireDevis(env.DB, numero);
+  if (!d) return { erreur: "Devis introuvable." };
+  await env.DB.prepare("DELETE FROM devis WHERE numero=?").bind(numero).run();
+  await assurerContratsSchema(env.DB);
+  await env.DB.prepare("DELETE FROM contrats WHERE devis_numero=?").bind(numero).run();
+  return { ok: true };
+}
+__name22(supprimerDevis, "supprimerDevis");
+async function facturerDevis(env, numero) {
+  await assurerDevisSchema(env.DB);
+  const d = await lireDevis(env.DB, numero);
+  if (!d) return { erreur: "Devis introuvable." };
+  if (d.facture_numero) return { numero: d.facture_numero };
+  const form = new FormData();
+  form.set("client_nom", d.client_nom);
+  form.set("client_societe", d.client_societe || "");
+  form.set("client_email", d.client_email);
+  form.set("prestation", d.titre);
+  form.set("description", `${d.contenu}
+
+D\xE9lai de livraison : ${d.delai_livraison}
+Selon devis n\xB0 ${numeroDevis(d)} du ${dateFr(d.date_devis)}.`);
+  form.set("montant", String(d.montant));
+  if (!d.client_email) return { erreur: "Une facture a besoin de l'email du client : ajoutez-le au devis avec \xAB Modifier \xBB, puis recommencez." };
+  const r = await creerFacture(env, form);
+  if (r.erreur) return r;
+  await env.DB.prepare("UPDATE devis SET statut='factur\xE9', facture_numero=? WHERE numero=?").bind(r.numero, numero).run();
+  return { numero: r.numero };
+}
+__name22(facturerDevis, "facturerDevis");
+async function envoyerDevis(env, numero, origine) {
+  await assurerDevisSchema(env.DB);
+  const d = await lireDevis(env.DB, numero);
+  if (!d) return { erreur: "Devis introuvable." };
+  const p = env._profil || {};
+  const num = numeroDevis(d);
+  const lien = `${origine}/d/${d.jeton}`;
+  if (!d.client_email) return { erreur: "Ce devis n'a pas d'email client. Ajoutez-le avec \xAB Modifier \xBB, ou t\xE9l\xE9chargez le PDF pour l'envoyer vous-m\xEAme." };
+  if (!await emailAutorise(env, "devis_envoi")) {
+    await noterEnvoi(env, "devis_envoi", d.client_email, null, "bloqu\xE9", "mod\xE8le en pause");
+    return { erreur: "L'envoi des devis est en pause. R\xE9activez-le dans Emails automatiques." };
+  }
+  const cell = `font-family:Helvetica,Arial,sans-serif;font-size:15px;line-height:1.65;color:${NOIR}`;
+  const corps = `<!doctype html><html lang="fr"><head><meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1"></head>
+    <body style="margin:0;padding:24px 12px;background:#EFEDE7">
+    <table role="presentation" width="600" cellpadding="0" cellspacing="0" border="0" align="center"
+      style="width:100%;max-width:600px;background:#fff;border:1px solid ${TRAIT};border-radius:10px">
+      <tr><td align="center" style="padding:30px 28px 18px">
+        <img src="${echapper(p.profil_logo || LOGO)}" alt="${echapper(p.profil_nom || "AdamEcom")}" width="230"
+          style="display:block;border:0;width:230px;max-width:64%;height:auto"></td></tr>
+      <tr><td style="padding:0 28px;${cell}">
+        <p>Bonjour ${echapper(d.client_nom)},</p>
+        <p>Comme convenu, voici mon devis <b>n\xB0 ${num}</b> pour \xAB ${echapper(d.titre)} \xBB.</p></td></tr>
+      <tr><td style="padding:6px 28px 0">
+        <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
+          <tr><td style="${cell};color:${GRIS};padding:4px 0">Montant</td>
+            <td align="right" style="${cell};font-weight:800;padding:4px 0">${euros(d.montant)}</td></tr>
+          <tr><td style="${cell};color:${GRIS};padding:4px 0">D\xE9lai de livraison</td>
+            <td align="right" style="${cell};font-weight:700;padding:4px 0">${echapper(d.delai_livraison)}</td></tr>
+          <tr><td style="${cell};color:${GRIS};padding:4px 0">Valable jusqu'au</td>
+            <td align="right" style="${cell};font-weight:700;padding:4px 0">${dateFr(finValiditeDevis(d))}</td></tr>
+        </table></td></tr>
+      <tr><td align="center" style="padding:24px 28px 8px">
+        <a href="${lien}" style="${cell};display:inline-block;background:${NOIR};color:#fff;font-weight:700;
+          padding:14px 28px;border-radius:7px;text-decoration:none">Voir et t\xE9l\xE9charger le devis \u2192</a></td></tr>
+      <tr><td style="padding:14px 28px 28px;${cell}">
+        <p>Pour valider, il vous suffit de r\xE9pondre \xE0 cet email.</p>
+        <p>Bien \xE0 vous,<br><b>Adam</b><br>
+          <span style="color:${GRIS}">${echapper(p.profil_activite || "Consultant Shopify & CRO")} \u2014 ${echapper(p.profil_nom || "AdamEcom")}</span></p></td></tr>
+    </table></body></html>`;
+  const objet = await objetEmail(env, "devis_envoi", `Devis n\xB0 ${num} \u2014 ${d.titre}`, { numero: num, client: d.client_nom, montant: euros(d.montant), titre: d.titre });
+  try {
+    await brevo(env, "/smtp/email", {
+      method: "POST",
+      body: JSON.stringify({
+        sender: { name: p.profil_nom || "AdamEcom", email: env.SENDER_EMAIL },
+        to: [{ email: d.client_email, name: d.client_nom }],
+        replyTo: { email: env.SENDER_EMAIL, name: p.profil_nom || "AdamEcom" },
+        subject: objet,
+        htmlContent: corps
+      })
+    });
+    await noterEnvoi(env, "devis_envoi", d.client_email, objet, "envoy\xE9", null);
+  } catch (e) {
+    await noterEnvoi(env, "devis_envoi", d.client_email, objet, "\xE9chec", e.message);
+    return { erreur: `Envoi refus\xE9 : ${e.message}` };
+  }
+  await env.DB.prepare("UPDATE devis SET statut=CASE WHEN statut='brouillon' THEN 'envoy\xE9' ELSE statut END, envoye_le=? WHERE numero=?").bind((/* @__PURE__ */ new Date()).toISOString(), numero).run();
+  return { ok: true, email: d.client_email };
+}
+__name22(envoyerDevis, "envoyerDevis");
+// ─── Contrats ────────────────────────────────────────────────────────────
+// Un contrat par devis, qui porte le même numéro. Les clauses sont pré-remplies
+// à partir du devis et restent modifiables tant que le client n'a pas signé.
+// Chaque partie signe en dessinant sa signature (image PNG stockée en base).
+var contratsSchemaOk = false;
+async function assurerContratsSchema(db) {
+  if (contratsSchemaOk) return;
+  await assurerDevisSchema(db);
+  await db.prepare(`CREATE TABLE IF NOT EXISTS contrats (
+    devis_numero      INTEGER PRIMARY KEY,
+    jeton             TEXT NOT NULL,
+    clauses           TEXT NOT NULL,
+    presta_nom        TEXT,
+    presta_signature  TEXT,
+    presta_signe_le   TEXT,
+    client_signataire TEXT,
+    client_signature  TEXT,
+    client_signe_le   TEXT,
+    client_ip         TEXT,
+    envoye_le         TEXT,
+    cree_le           TEXT NOT NULL
+  )`).run();
+  contratsSchemaOk = true;
+}
+__name22(assurerContratsSchema, "assurerContratsSchema");
+var modalitesDevis = /* @__PURE__ */ __name22((d) => {
+  const pct = Number(d.acompte_pct || 0);
+  const acompte = Math.round(Number(d.montant) * pct) / 100;
+  if (pct >= 100) return `La totalit\xE9 du prix est payable \xE0 la signature du pr\xE9sent contrat.`;
+  if (pct <= 0) return `La totalit\xE9 du prix est payable \xE0 la livraison.`;
+  return `Un acompte de ${pct} %, soit ${euros(acompte)}, est payable \xE0 la signature du pr\xE9sent contrat ; le solde de ${euros(Number(d.montant) - acompte)} est payable \xE0 la livraison.`;
+}, "modalitesDevis");
+function clausesParDefaut(d) {
+  const articles = [
+    ["OBJET", `Le pr\xE9sent contrat d\xE9finit les conditions dans lesquelles le Prestataire r\xE9alise pour le Client la prestation \xAB ${d.titre} \xBB, d\xE9crite ci-dessus et dans le devis n\xB0 ${numeroDevis(d)} du ${dateFr(d.date_devis)}, qui fait partie int\xE9grante du contrat.`],
+    ["D\xC9LAI DE R\xC9ALISATION", `La prestation sera livr\xE9e dans un d\xE9lai de ${d.delai_livraison} \xE0 compter de la r\xE9ception de l'acompte et de l'ensemble des \xE9l\xE9ments n\xE9cessaires fournis par le Client (acc\xE8s, contenus, visuels). Tout retard dans la transmission de ces \xE9l\xE9ments d\xE9cale d'autant la date de livraison.`],
+    ["PRIX ET MODALIT\xC9S DE PAIEMENT", `Le prix total de la prestation est de ${euros(d.montant)} TTC (TVA non applicable, article 293 B du CGI). ${modalitesDevis(d)} Les paiements s'effectuent par virement bancaire.`],
+    ["OBLIGATIONS DU CLIENT", `Le Client s'engage \xE0 fournir au Prestataire les acc\xE8s, informations et contenus n\xE9cessaires, \xE0 r\xE9pondre dans des d\xE9lais raisonnables aux demandes de validation, et \xE0 r\xE9gler les sommes dues aux \xE9ch\xE9ances pr\xE9vues.`],
+    ["OBLIGATIONS DU PRESTATAIRE", `Le Prestataire s'engage \xE0 r\xE9aliser la prestation avec soin et selon les r\xE8gles de l'art, et \xE0 tenir le Client inform\xE9 de son avancement. Il est tenu \xE0 une obligation de moyens.`],
+    ["DEMANDES SUPPL\xC9MENTAIRES", `Toute demande ne figurant pas dans le devis fera l'objet d'un devis compl\xE9mentaire, soumis \xE0 l'accord du Client avant r\xE9alisation.`],
+    ["PROPRI\xC9T\xC9 DES LIVRABLES", `Les livrables deviennent la propri\xE9t\xE9 du Client apr\xE8s paiement int\xE9gral du prix. Le Prestataire peut mentionner la r\xE9alisation dans ses r\xE9f\xE9rences commerciales, sauf refus \xE9crit du Client.`],
+    ["CONFIDENTIALIT\xC9", `Chaque partie s'engage \xE0 garder confidentielles les informations de l'autre partie dont elle a connaissance \xE0 l'occasion du contrat.`],
+    ["R\xC9SILIATION", `En cas de manquement grave de l'une des parties, non r\xE9par\xE9 dans les quinze jours suivant une mise en demeure, l'autre partie peut r\xE9silier le contrat. Les travaux r\xE9alis\xE9s jusqu'\xE0 la r\xE9siliation restent dus et l'acompte vers\xE9 reste acquis au Prestataire.`],
+    ["DROIT APPLICABLE", `Le pr\xE9sent contrat est soumis au droit fran\xE7ais. En cas de litige, les parties rechercheront une solution amiable avant toute action judiciaire.`]
+  ];
+  if (d.conditions) articles.push(["CONDITIONS PARTICULI\xC8RES", d.conditions]);
+  return articles.map(([t, c], i) => `ARTICLE ${i + 1} — ${t}
+${c}`).join("\n\n");
+}
+__name22(clausesParDefaut, "clausesParDefaut");
+var lireContrat = /* @__PURE__ */ __name22((db, numero) => db.prepare("SELECT * FROM contrats WHERE devis_numero = ?").bind(numero).first(), "lireContrat");
+var lireContratParJeton = /* @__PURE__ */ __name22((db, jeton) => db.prepare("SELECT * FROM contrats WHERE jeton = ?").bind(jeton).first(), "lireContratParJeton");
+var statutContrat = /* @__PURE__ */ __name22((c) => c.client_signature && c.presta_signature ? "sign\xE9" : c.client_signature ? "sign\xE9 par le client" : c.presta_signature ? "en attente du client" : c.envoye_le ? "envoy\xE9" : "brouillon", "statutContrat");
+async function creerContrat(env, numero) {
+  await assurerContratsSchema(env.DB);
+  const d = await lireDevis(env.DB, numero);
+  if (!d) return { erreur: "Devis introuvable." };
+  if (await lireContrat(env.DB, numero)) return { ok: true };
+  const p = env._profil || {};
+  await env.DB.prepare(`INSERT INTO contrats (devis_numero, jeton, clauses, presta_nom, cree_le) VALUES (?, ?, ?, ?, ?)`).bind(numero, nouveauJeton(), clausesParDefaut(d), p.profil_nom || "AdamEcom", (/* @__PURE__ */ new Date()).toISOString()).run();
+  return { ok: true };
+}
+__name22(creerContrat, "creerContrat");
+async function modifierContrat(env, numero, form) {
+  await assurerContratsSchema(env.DB);
+  const c = await lireContrat(env.DB, numero);
+  if (!c) return { erreur: "Contrat introuvable." };
+  if (c.client_signature) return { erreur: "Le client a d\xE9j\xE0 sign\xE9 : le contrat ne peut plus \xEAtre modifi\xE9." };
+  const clauses = String(form.get("clauses") || "").trim();
+  const nom = String(form.get("presta_nom") || "").trim();
+  if (!clauses) return { erreur: "Les clauses ne peuvent pas \xEAtre vides." };
+  // Modifier le texte annule une signature d\xE9j\xE0 pos\xE9e : on signe ce qu'on a lu.
+  await env.DB.prepare("UPDATE contrats SET clauses=?, presta_nom=?, presta_signature=CASE WHEN clauses=? THEN presta_signature ELSE NULL END, presta_signe_le=CASE WHEN clauses=? THEN presta_signe_le ELSE NULL END WHERE devis_numero=?").bind(clauses, nom || c.presta_nom, clauses, clauses, numero).run();
+  return { ok: true };
+}
+__name22(modifierContrat, "modifierContrat");
+var signatureValide = /* @__PURE__ */ __name22((s) => typeof s === "string" && /^data:image\/png;base64,[A-Za-z0-9+/=]+$/.test(s) && s.length > 200 && s.length < 3e5, "signatureValide");
+async function signerContratPresta(env, numero, form) {
+  await assurerContratsSchema(env.DB);
+  const c = await lireContrat(env.DB, numero);
+  if (!c) return { erreur: "Contrat introuvable." };
+  const sig = String(form.get("signature") || "");
+  if (!signatureValide(sig)) return { erreur: "Dessinez votre signature avant de valider." };
+  await env.DB.prepare("UPDATE contrats SET presta_signature=?, presta_signe_le=? WHERE devis_numero=?").bind(sig, (/* @__PURE__ */ new Date()).toISOString(), numero).run();
+  return { ok: true };
+}
+__name22(signerContratPresta, "signerContratPresta");
+async function signerContratClient(env, jeton, form, ip) {
+  await assurerContratsSchema(env.DB);
+  const c = await lireContratParJeton(env.DB, jeton);
+  if (!c) return { erreur: "Contrat introuvable." };
+  if (c.client_signature) return { erreur: "Ce contrat est d\xE9j\xE0 sign\xE9." };
+  const nom = String(form.get("nom") || "").trim().slice(0, 120);
+  const sig = String(form.get("signature") || "");
+  if (!nom) return { erreur: "Indiquez votre nom et pr\xE9nom." };
+  if (form.get("accepte") !== "1") return { erreur: "Cochez la case \xAB Lu et approuv\xE9 \xBB." };
+  if (!signatureValide(sig)) return { erreur: "Dessinez votre signature dans le cadre." };
+  const maintenant = (/* @__PURE__ */ new Date()).toISOString();
+  await env.DB.prepare("UPDATE contrats SET client_signataire=?, client_signature=?, client_signe_le=?, client_ip=? WHERE jeton=? AND client_signature IS NULL").bind(nom, sig, maintenant, ip || null, jeton).run();
+  await env.DB.prepare("UPDATE devis SET statut='accept\xE9' WHERE numero=? AND statut IN ('brouillon','envoy\xE9','refus\xE9')").bind(c.devis_numero).run();
+  const d = await lireDevis(env.DB, c.devis_numero);
+  if (env.NOTIF_EMAIL && d) {
+    await brevo(env, "/smtp/email", {
+      method: "POST",
+      body: JSON.stringify({
+        sender: { name: "AdamEcom", email: env.SENDER_EMAIL },
+        to: [{ email: env.NOTIF_EMAIL }],
+        subject: `Contrat n\xB0 ${numeroDevis(d)} sign\xE9 par ${nom}`,
+        htmlContent: `<p><b>${echapper(nom)}</b> vient de signer le contrat n\xB0 ${numeroDevis(d)} (\xAB ${echapper(d.titre)} \xBB, ${euros(d.montant)}).</p>`
+      })
+    }).catch(() => {
+    });
+  }
+  return { ok: true };
+}
+__name22(signerContratClient, "signerContratClient");
+async function envoyerContrat(env, numero, origine) {
+  await assurerContratsSchema(env.DB);
+  const c = await lireContrat(env.DB, numero);
+  const d = c && await lireDevis(env.DB, numero);
+  if (!c || !d) return { erreur: "Contrat introuvable." };
+  const p = env._profil || {};
+  const num = numeroDevis(d);
+  const lien = `${origine}/c/${c.jeton}`;
+  if (!d.client_email) return { erreur: "Ce devis n'a pas d'email client : copiez le lien de signature pour l'envoyer par WhatsApp." };
+  if (!await emailAutorise(env, "contrat_envoi")) {
+    await noterEnvoi(env, "contrat_envoi", d.client_email, null, "bloqu\xE9", "mod\xE8le en pause");
+    return { erreur: "L'envoi des contrats est en pause. R\xE9activez-le dans Emails automatiques." };
+  }
+  const cell = `font-family:Helvetica,Arial,sans-serif;font-size:15px;line-height:1.65;color:${NOIR}`;
+  const corps = `<!doctype html><html lang="fr"><head><meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1"></head>
+    <body style="margin:0;padding:24px 12px;background:#EFEDE7">
+    <table role="presentation" width="600" cellpadding="0" cellspacing="0" border="0" align="center"
+      style="width:100%;max-width:600px;background:#fff;border:1px solid ${TRAIT};border-radius:10px">
+      <tr><td align="center" style="padding:30px 28px 18px">
+        <img src="${echapper(p.profil_logo || LOGO)}" alt="${echapper(p.profil_nom || "AdamEcom")}" width="230"
+          style="display:block;border:0;width:230px;max-width:64%;height:auto"></td></tr>
+      <tr><td style="padding:0 28px;${cell}">
+        <p>Bonjour ${echapper(d.client_nom)},</p>
+        <p>Voici le contrat <b>n\xB0 ${num}</b> pour \xAB ${echapper(d.titre)} \xBB (${euros(d.montant)}).
+          Vous pouvez le lire et le signer en ligne en deux minutes, depuis votre ordinateur ou votre t\xE9l\xE9phone.</p></td></tr>
+      <tr><td align="center" style="padding:18px 28px 8px">
+        <a href="${lien}" style="${cell};display:inline-block;background:${NOIR};color:#fff;font-weight:700;
+          padding:14px 28px;border-radius:7px;text-decoration:none">Lire et signer le contrat →</a></td></tr>
+      <tr><td style="padding:14px 28px 28px;${cell}">
+        <p>Bien \xE0 vous,<br><b>Adam</b><br>
+          <span style="color:${GRIS}">${echapper(p.profil_activite || "Consultant Shopify & CRO")} — ${echapper(p.profil_nom || "AdamEcom")}</span></p></td></tr>
+    </table></body></html>`;
+  const objet = await objetEmail(env, "contrat_envoi", `Contrat n\xB0 ${num} \xE0 signer — ${d.titre}`, { numero: num, client: d.client_nom, titre: d.titre });
+  try {
+    await brevo(env, "/smtp/email", {
+      method: "POST",
+      body: JSON.stringify({
+        sender: { name: p.profil_nom || "AdamEcom", email: env.SENDER_EMAIL },
+        to: [{ email: d.client_email, name: d.client_nom }],
+        replyTo: { email: env.SENDER_EMAIL, name: p.profil_nom || "AdamEcom" },
+        subject: objet,
+        htmlContent: corps
+      })
+    });
+    await noterEnvoi(env, "contrat_envoi", d.client_email, objet, "envoy\xE9", null);
+  } catch (e) {
+    await noterEnvoi(env, "contrat_envoi", d.client_email, objet, "\xE9chec", e.message);
+    return { erreur: `Envoi refus\xE9 : ${e.message}` };
+  }
+  await env.DB.prepare("UPDATE contrats SET envoye_le=? WHERE devis_numero=?").bind((/* @__PURE__ */ new Date()).toISOString(), numero).run();
+  return { ok: true, email: d.client_email };
+}
+__name22(envoyerContrat, "envoyerContrat");
+// Cadre de signature \xE0 la souris ou au doigt ; remplit l'input cach\xE9 #sig en PNG.
+var PAVE_SIGNATURE = `<div class="pave"><canvas id="pave" width="600" height="200"></canvas>
+  <button type="button" class="effacer" onclick="effacerPave()">Effacer</button></div>
+<input type="hidden" name="signature" id="sig">
+<script>
+(function(){
+  var cv=document.getElementById('pave'),cx=cv.getContext('2d'),trace=false,vide=true,der=null;
+  cx.lineWidth=2.4;cx.lineCap='round';cx.lineJoin='round';cx.strokeStyle='#14120E';
+  function pos(e){var r=cv.getBoundingClientRect();return{x:(e.clientX-r.left)*cv.width/r.width,y:(e.clientY-r.top)*cv.height/r.height};}
+  cv.addEventListener('pointerdown',function(e){trace=true;der=pos(e);cv.setPointerCapture(e.pointerId);e.preventDefault();});
+  cv.addEventListener('pointermove',function(e){if(!trace)return;var p=pos(e);cx.beginPath();cx.moveTo(der.x,der.y);cx.lineTo(p.x,p.y);cx.stroke();der=p;vide=false;e.preventDefault();});
+  function fin(){if(!trace)return;trace=false;document.getElementById('sig').value=vide?'':cv.toDataURL('image/png');}
+  cv.addEventListener('pointerup',fin);cv.addEventListener('pointercancel',fin);
+  window.effacerPave=function(){cx.clearRect(0,0,cv.width,cv.height);vide=true;document.getElementById('sig').value='';};
+})();
+<\/script>`;
+var STYLE_PAVE = `.pave{position:relative;border:1.5px dashed #BDB6A5;border-radius:9px;background:#fff;max-width:600px}
+  .pave canvas{display:block;width:100%;height:auto;aspect-ratio:3/1;touch-action:none;cursor:crosshair}
+  .pave .effacer{position:absolute;top:8px;right:8px;background:#F3F0E9;border:0;border-radius:6px;padding:6px 10px;font:600 12px/1 inherit;cursor:pointer;color:#14120E}`;
+// Chaque article (titre + texte) reste group\xE9 pour ne pas \xEAtre coup\xE9 entre deux pages du PDF.
+function articlesContrat(clauses) {
+  const groupes = [];
+  for (const bloc of String(clauses || "").replace(/\r/g, "").split(/\n\s*\n/)) {
+    const premiere = bloc.trim().split("\n")[0] || "";
+    const lettres = premiere.replace(/[^A-Za-z\xC0-\xFF]/g, "");
+    const titre = /^ARTICLE\b/i.test(premiere) || lettres.length >= 4 && premiere.length <= 70 && lettres === lettres.toUpperCase();
+    if (titre || !groupes.length) groupes.push([bloc]);
+    else groupes[groupes.length - 1].push(bloc);
+  }
+  return groupes.map((g) => `<div class="article">${formaterContenuDevis(g.join("\n\n"))}</div>`).join("\n");
+}
+__name22(articlesContrat, "articlesContrat");
+function gabaritContrat(c, d, env, opts = {}) {
+  const p = env._profil || {};
+  const num = numeroDevis(d);
+  const eq = /* @__PURE__ */ __name22((x) => `position:absolute;width:46px;height:46px;border:6px solid ${JAUNE};${x}`, "eq");
+  const logo = /^https?:/.test(p.profil_logo || LOGO) ? "/logo-devis" : p.profil_logo;
+  const bloc = /* @__PURE__ */ __name22((titre, nom, sig, le, mention) => `<div class="case">
+      <div class="k">${titre}</div>
+      <div class="qui">${echapper(nom || "")}</div>
+      ${sig ? `<img class="sigimg" src="${echapper(sig)}" alt="Signature">
+        <div class="s">${mention ? "Lu et approuv\xE9 \xB7 " : ""}sign\xE9 \xE9lectroniquement le ${dateFr(le)}</div>` : `<div class="attente">En attente de signature</div>`}
+    </div>`, "bloc");
+  const formClient = !c.client_signature && opts.public ? `
+  <div class="signer" id="signer">
+    <h3>Signer le contrat</h3>
+    ${opts.erreur ? `<div class="err">${echapper(opts.erreur)}</div>` : ""}
+    <form method="POST" onsubmit="if(!document.getElementById('sig').value){alert('Dessinez votre signature dans le cadre.');return false;}">
+      <label>Nom et pr\xE9nom<input name="nom" required value="${echapper(d.client_nom)}"></label>
+      <label style="margin-top:14px">Votre signature <span class="aide">(\xE0 la souris ou au doigt)</span></label>
+      ${PAVE_SIGNATURE}
+      <label class="coche"><input type="checkbox" name="accepte" value="1" required>
+        J'ai lu le contrat et je l'accepte (\xAB Lu et approuv\xE9 \xBB).</label>
+      <button type="submit">Signer le contrat</button>
+    </form>
+  </div>` : "";
+  return `<!doctype html><html lang="fr"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex,nofollow">
+<title>Contrat n\xB0 ${num} — ${echapper(p.profil_nom || "AdamEcom")}</title>
+<style>
+  @page{size:A4;margin:14mm}
+  *{box-sizing:border-box}
+  body{margin:0;background:#E9E7E1;color:${NOIR};
+    font-family:"Helvetica Neue",Helvetica,Arial,system-ui,sans-serif;
+    font-size:15px;line-height:1.6;-webkit-font-smoothing:antialiased}
+  .feuille{position:relative;max-width:860px;margin:28px auto;background:#fff;
+    padding:56px 62px 46px;box-shadow:0 2px 26px rgba(0,0,0,.09)}
+  .eq1{${eq("top:20px;left:20px;border-right:0;border-bottom:0")}}
+  .eq2{${eq("top:20px;right:20px;border-left:0;border-bottom:0")}}
+  .eq3{${eq("bottom:20px;left:20px;border-right:0;border-top:0")}}
+  .eq4{${eq("bottom:20px;right:20px;border-left:0;border-top:0")}}
+  .logo{text-align:center;margin-bottom:30px}
+  .logo img{width:280px;max-width:66%;height:auto;display:inline-block}
+  h1{text-align:center;font-size:22px;letter-spacing:.06em;margin:0 0 4px}
+  .sous{text-align:center;color:${GRIS};font-size:13.5px;margin-bottom:34px}
+  .badge{display:inline-block;background:${NOIR};color:#fff;font-weight:800;
+    font-size:13px;letter-spacing:.05em;padding:8px 18px}
+  .parties{display:flex;gap:28px}
+  .partie{flex:1;min-width:0}
+  .corps{font-size:14.5px;line-height:1.85;margin-top:12px}
+  .corps .eti{color:${GRIS}}
+  .nom{font-weight:800;font-size:16px}
+  .adresse{white-space:pre-line}
+  .bande{background:${JAUNE};text-align:center;font-weight:800;font-size:12.5px;
+    letter-spacing:.18em;padding:12px;margin:36px 0 0}
+  .presta{font-weight:800;font-size:18px;margin:24px 0 12px}
+  .intertitre{margin:22px 0 8px;font-size:13px;font-weight:800;letter-spacing:.1em;text-transform:uppercase;
+    padding-bottom:6px;border-bottom:1px solid ${TRAIT}}
+  .para{margin:8px 0;font-size:14.5px;line-height:1.7;text-align:justify}
+  ul.inclus{list-style:none;margin:6px 0 10px;padding:0}
+  ul.inclus li{position:relative;padding:6px 0 6px 30px;font-size:14.5px;line-height:1.6;
+    border-bottom:1px dashed ${TRAIT};display:flex;gap:16px;align-items:baseline}
+  ul.inclus li:last-child{border-bottom:0}
+  ul.inclus li::before{content:"";position:absolute;left:2px;top:11px;width:14px;height:14px;background:${JAUNE};border-radius:3px}
+  ul.inclus li::after{content:"";position:absolute;left:6px;top:13px;width:4px;height:7px;
+    border:solid ${NOIR};border-width:0 2px 2px 0;transform:rotate(45deg)}
+  .ltxt{flex:1}.prix{margin-left:auto;font-weight:700;white-space:nowrap}
+  .infos{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin:26px 0 0}
+  .info{border:1px solid ${TRAIT};border-radius:9px;padding:14px 16px}
+  .info .k{font-size:11.5px;font-weight:800;letter-spacing:.12em;color:${GRIS};text-transform:uppercase}
+  .info .v{font-weight:800;font-size:15px;margin-top:4px}
+  .fait{margin:34px 0 0;font-size:14.5px}
+  .accord{margin:16px 0 0;display:flex;gap:22px}
+  .accord .case{flex:1;border:1px solid ${TRAIT};border-radius:9px;padding:14px 18px;min-height:170px}
+  .accord .k{font-size:11.5px;font-weight:800;letter-spacing:.12em;color:${GRIS}}
+  .accord .qui{font-weight:800;margin-top:4px}
+  .accord .s{font-size:12px;color:${GRIS};margin-top:2px}
+  .accord .attente{margin-top:34px;color:#B3AC9C;font-size:13px;font-style:italic}
+  .sigimg{display:block;max-width:100%;height:80px;object-fit:contain;object-position:left;margin-top:8px}
+  .pied{margin-top:38px;padding-top:18px;border-top:1px solid ${TRAIT};text-align:center;font-size:11.5px;color:${GRIS}}
+  .signer{max-width:860px;margin:0 auto 40px;background:#fff;padding:28px 62px 34px;box-shadow:0 2px 26px rgba(0,0,0,.09);
+    border-top:6px solid ${JAUNE}}
+  .signer h3{margin:0 0 14px;font-size:18px}
+  .signer label{display:block;font-weight:700;font-size:14px}
+  .signer .aide{font-weight:400;color:${GRIS}}
+  .signer input[name=nom]{display:block;width:100%;max-width:420px;margin-top:6px;padding:11px 13px;font:15px inherit;
+    border:1px solid ${TRAIT};border-radius:8px}
+  .signer .pave{margin-top:8px}
+  .signer .coche{display:flex;gap:10px;align-items:center;font-weight:400;margin:16px 0}
+  .signer button[type=submit]{background:${NOIR};color:#fff;font:700 15px/1 inherit;border:0;padding:15px 28px;border-radius:8px;cursor:pointer}
+  .signer .err{background:#FAEAE4;color:#9E3319;padding:10px 14px;border-radius:8px;margin-bottom:14px}
+  .ok{max-width:860px;margin:0 auto 20px;background:#E8F1E4;color:#2F6B2A;padding:14px 20px;border-radius:9px;font-weight:700}
+  ${STYLE_PAVE}
+  .barre{position:fixed;top:14px;right:14px;display:flex;gap:8px;z-index:5}
+  .barre button,.barre a{background:${JAUNE};color:${NOIR};font:700 14px/1 inherit;border:0;
+    padding:12px 20px;border-radius:8px;cursor:pointer;text-decoration:none}
+  .barre .sec{background:#fff;border:1px solid ${TRAIT}}
+  body.pdf{background:#fff}
+  body.pdf .barre,body.pdf .eq1,body.pdf .eq2,body.pdf .eq3,body.pdf .eq4,body.pdf .signer,body.pdf .ok{display:none}
+  body.pdf .feuille{margin:0 auto;box-shadow:none;width:794px;max-width:none;padding:0 56px}
+  @media(max-width:760px){
+    body{font-size:14px}
+    .feuille{margin:0;padding:34px 20px 30px;box-shadow:none}
+    .eq1,.eq2,.eq3,.eq4{display:none}
+    .parties,.accord{flex-direction:column;gap:20px}
+    .infos{grid-template-columns:1fr}
+    .signer{padding:24px 20px 30px;margin:0}
+    .barre{position:static;padding:14px 20px 0}
+    .barre button,.barre a{flex:1;text-align:center}
+  }
+  @media print{
+    body{background:#fff}
+    .feuille{margin:0;padding:0;box-shadow:none;max-width:none}
+    .barre,.signer,.ok,.eq1,.eq2,.eq3,.eq4{display:none}
+    .infos,.accord,.article,ul.inclus li{break-inside:avoid}
+  }
+</style></head><body>
+<div class="barre"><button onclick="telechargerPdf()">T\xE9l\xE9charger le PDF</button>
+  ${formClient ? `<a class="sec" href="#signer">Signer</a>` : `<button class="sec" onclick="window.print()">Imprimer</button>`}</div>
+${opts.merci ? `<div class="ok" style="margin-top:28px">Merci, votre signature est enregistr\xE9e. Vous pouvez t\xE9l\xE9charger le contrat sign\xE9 en PDF.</div>` : ""}
+<div class="feuille">
+  <div class="eq1"></div><div class="eq2"></div><div class="eq3"></div><div class="eq4"></div>
+  <div class="logo"><img src="${echapper(logo)}" alt="${echapper(p.profil_nom || "AdamEcom")}"></div>
+  <h1>CONTRAT DE PRESTATION DE SERVICES</h1>
+  <div class="sous">Contrat n\xB0 ${num} \xB7 \xE9tabli le ${dateFr(c.cree_le)} \xB7 sur la base du devis n\xB0 ${num}</div>
+
+  <div class="parties">
+    <div class="partie">
+      <span class="badge">LE PRESTATAIRE</span>
+      <div class="corps">
+        <span class="nom">${echapper(p.profil_nom || "AdamEcom")}</span><br>
+        ${p.profil_activite ? `${echapper(p.profil_activite)}<br>` : ""}
+        ${c.presta_nom && c.presta_nom !== (p.profil_nom || "AdamEcom") ? `<span class="eti">Repr\xE9sent\xE9 par</span> ${echapper(c.presta_nom)}<br>` : ""}
+        ${p.profil_email ? `<span class="eti">Email</span> ${echapper(p.profil_email)}<br>` : ""}
+        ${p.profil_telephone ? `<span class="eti">T\xE9l.</span> ${echapper(p.profil_telephone)}<br>` : ""}
+        ${p.profil_site ? `<span class="eti">Site</span> ${echapper(p.profil_site)}` : ""}
+      </div>
+    </div>
+    <div class="partie">
+      <span class="badge">LE CLIENT</span>
+      <div class="corps">
+        <span class="nom">${echapper(d.client_nom)}</span><br>
+        ${d.client_societe ? `${echapper(d.client_societe)}<br>` : ""}
+        ${d.client_adresse ? `<span class="adresse">${echapper(d.client_adresse)}</span><br>` : ""}
+        ${d.client_email ? `<span class="eti">Email</span> ${echapper(d.client_email)}` : ""}
+        ${d.client_telephone ? `<br><span class="eti">T\xE9l.</span> ${echapper(d.client_telephone)}` : ""}
+      </div>
+    </div>
+  </div>
+
+  <div class="bande">OBJET ET PRESTATIONS</div>
+  <div class="presta">${echapper(d.titre)}</div>
+  ${formaterContenuDevis(d.contenu)}
+  <div class="infos">
+    <div class="info"><div class="k">Prix total TTC</div><div class="v">${euros(d.montant)}</div></div>
+    <div class="info"><div class="k">D\xE9lai de livraison</div><div class="v">${echapper(d.delai_livraison)}</div></div>
+    <div class="info"><div class="k">Acompte \xE0 la signature</div><div class="v">${Number(d.acompte_pct || 0)} %</div></div>
+  </div>
+
+  <div class="bande">CONDITIONS DU CONTRAT</div>
+  ${articlesContrat(c.clauses)}
+
+  <div class="fait">Fait en deux exemplaires, sign\xE9s \xE9lectroniquement.</div>
+  <div class="accord">
+    ${bloc("LE PRESTATAIRE", c.presta_nom || p.profil_nom, c.presta_signature, c.presta_signe_le, false)}
+    ${bloc("LE CLIENT", c.client_signataire || d.client_nom, c.client_signature, c.client_signe_le, true)}
+  </div>
+  <div class="pied">Contrat n\xB0 ${num} \xB7 ${echapper(p.profil_nom || "AdamEcom")}${p.profil_site ? ` \xB7 ${echapper(p.profil_site)}` : ""}</div>
+</div>
+${formClient}
+<script src="https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js"><\/script>
+<script>
+function telechargerPdf(){
+  if(!window.html2pdf){ window.print(); return; }
+  document.body.classList.add('pdf'); window.scrollTo(0, 0);
+  return html2pdf().set({
+    margin:[12,0,12,0], filename:'Contrat-${num}.pdf',
+    image:{type:'jpeg',quality:0.97},
+    html2canvas:{scale:2,useCORS:true,backgroundColor:'#ffffff'},
+    jsPDF:{unit:'mm',format:'a4',orientation:'portrait'},
+    pagebreak:{mode:['css','legacy'],avoid:['.infos','.accord','.article','li']}
+  }).from(document.querySelector('.feuille')).save().then(function(){ document.body.classList.remove('pdf'); });
+}
+if(/[?&]telecharger=1/.test(location.search)){
+  window.addEventListener('load', function(){ setTimeout(telechargerPdf, 300); });
+}
+<\/script></body></html>`;
+}
+__name22(gabaritContrat, "gabaritContrat");
 var AUTORISATION = "https://accounts.google.com/o/oauth2/v2/auth";
 var JETON = "https://oauth2.googleapis.com/token";
 var AGENDA = "https://www.googleapis.com/calendar/v3";
@@ -3268,6 +4099,12 @@ var tous2 = /* @__PURE__ */ __name22(async (db, sql, ...args) => {
 }, "tous");
 var echapperJs = /* @__PURE__ */ __name22((s) => String(s || "").replace(/\\/g, "\\\\").replace(/'/g, "\\'").replace(/\n/g, " "), "echapperJs");
 var COULEURS = {
+  "sign\xE9": "vert",
+  "sign\xE9 par le client": "jaune",
+  "en attente du client": "jaune",
+  "accept\xE9": "vert",
+  "factur\xE9": "vert",
+  "refus\xE9": "gris",
   "pay\xE9e": "vert",
   "abonn\xE9": "vert",
   "d\xE9j\xE0 abonn\xE9": "vert",
@@ -3310,6 +4147,8 @@ var ICONES = {
   prospects: '<path d="M12 21a9 9 0 1 1 9-9"/><path d="M12 7v5l3 2"/><path d="M16 19h6M19 16v6"/>',
   clients: '<path d="M16 20v-1.5a4 4 0 0 0-4-4H7a4 4 0 0 0-4 4V20"/><circle cx="9.5" cy="7" r="3.5"/><path d="M17 4.2a3.5 3.5 0 0 1 0 6.6M21 20v-1.5a4 4 0 0 0-3-3.8"/>',
   facturation: '<path d="M6 3h12v18l-3-2-3 2-3-2-3 2z"/><path d="M14 8H9.8a2 2 0 0 0 0 4h2.4a2 2 0 0 1 0 4H9"/><path d="M11.5 6.5v11"/>',
+  devis: '<path d="M14 3H6v18h12V7z"/><path d="M14 3v4h4"/><path d="M9 12h6M9 16h6M9 8h2"/>',
+  contrats: '<path d="M14 3H6v18h12V7z"/><path d="M14 3v4h4"/><path d="M8.5 17c1.2-2 2-2 2.6-.8.5 1 1.1 1.2 2-.2.6-.9 1.3-.9 2.4.2"/><path d="M9 9h5M9 12h6"/>',
   meeting: '<rect x="2.5" y="6" width="13" height="12" rx="2.5"/><path d="M15.5 10.5l6-3v9l-6-3z"/>',
   blog: '<path d="M5 4h14v16H5z"/><path d="M8 8h8M8 12h8M8 16h5"/>',
   newsletter: '<rect x="2.5" y="5" width="19" height="14" rx="2.5"/><path d="M3.5 7.5l7.4 5.2a2 2 0 0 0 2.2 0l7.4-5.2"/>',
@@ -3374,6 +4213,18 @@ var PAGES = [
     nom: "Factures",
     groupe: "Activit\xE9",
     sous: "Vos factures \xE9mises, ce qui reste \xE0 encaisser, et le suivi de la boutique."
+  },
+  {
+    id: "devis",
+    nom: "Devis",
+    groupe: "Activit\xE9",
+    sous: "Collez ce qui est inclus : le devis est mis en page avec votre logo, pr\xEAt \xE0 envoyer ou imprimer."
+  },
+  {
+    id: "contrats",
+    nom: "Contrats",
+    groupe: "Activit\xE9",
+    sous: "Un contrat g\xE9n\xE9r\xE9 \xE0 partir d'un devis, sign\xE9 en ligne par vous et par le client."
   },
   {
     id: "meeting",
@@ -6103,6 +6954,309 @@ Une vraie commande de ${euros3(f.montant)} sera cr\xE9\xE9e dans Shopify et comp
 __name(pageFacture, "pageFacture");
 __name2(pageFacture, "pageFacture");
 __name22(pageFacture, "pageFacture");
+async function pageDevis(env, url, message) {
+  await assurerDevisSchema(env.DB);
+  const cle = encodeURIComponent(env.CLE_TEST);
+  const numero = url.searchParams.get("numero");
+  const formulaire = /* @__PURE__ */ __name22((d, action, clients) => {
+    const val = /* @__PURE__ */ __name22((k, def = "") => echapper(d && d[k] != null ? d[k] : def), "val");
+    const aujourdhui = (/* @__PURE__ */ new Date()).toISOString().slice(0, 10);
+    const acompte = d ? Number(d.acompte_pct) : 50;
+    return `
+    <form class="f" method="POST" action="?cle=${cle}&page=devis${d ? `&numero=${d.numero}` : ""}&action=${action}"
+      onsubmit="if(this.dataset.envoi){return false;}this.dataset.envoi='1';var b=this.querySelector('button[type=submit]');b.disabled=true;b.textContent='${d ? "Enregistrement" : "Cr\xE9ation du devis"} en cours\u2026';">
+      ${clients && clients.length ? `<label class="large">Client existant
+        <select id="choixD" onchange="remplirD()">
+          <option value="">— Nouveau client, \xE0 saisir ci-dessous —</option>
+          ${clients.map((c) => `<option value="${echapper(c.email)}" data-nom="${echapper(c.displayName || "")}">
+            ${echapper(c.displayName || c.email)} — ${echapper(c.email)}</option>`).join("")}
+        </select></label>` : ""}
+      <label>Nom du client<input name="client_nom" id="nomD" required value="${val("client_nom")}" placeholder="Nicolas Visine"></label>
+      <label>Soci\xE9t\xE9 <span style="font-weight:400">(facultatif)</span>
+        <input name="client_societe" value="${val("client_societe")}" placeholder="T\xF6sty.fr"></label>
+      <label>Email du client <span style="font-weight:400">(facultatif)</span><input name="client_email" id="emailD" type="email" value="${val("client_email")}" placeholder="client@exemple.com"></label>
+      <label>T\xE9l\xE9phone <span style="font-weight:400">(facultatif)</span>
+        <input name="client_telephone" value="${val("client_telephone")}" placeholder="+33 6 12 34 56 78"></label>
+      <label class="large">Adresse du client <span style="font-weight:400">(facultatif)</span>
+        <textarea name="client_adresse" style="min-height:70px" placeholder="12 rue de la Paix&#10;75002 Paris">${val("client_adresse")}</textarea></label>
+
+      <label class="large">Titre du projet
+        <input name="titre" required value="${val("titre")}" placeholder="Refonte compl\xE8te de la boutique Shopify"></label>
+      <label class="large">Ce qui est inclus <span style="font-weight:400">(collez votre texte, la mise en forme est automatique)</span>
+        <textarea name="contenu" required style="min-height:260px" placeholder="DESIGN&#10;- Refonte de la page d'accueil&#10;- Page produit optimis\xE9e pour la conversion — 350 €&#10;&#10;TECHNIQUE :&#10;- Installation des applications&#10;- Optimisation de la vitesse">${val("contenu")}</textarea></label>
+      <p class="sec large" style="margin:-6px 0 4px;font-size:12.5px">Astuce : une ligne qui commence par \xAB - \xBB devient une puce coch\xE9e,
+        une ligne en MAJUSCULES ou termin\xE9e par \xAB : \xBB devient un intertitre, un prix en fin de ligne (\xAB — 150 € \xBB) s'aligne \xE0 droite.</p>
+
+      <label>Prix total TTC en euros<input name="montant" required inputmode="decimal" value="${val("montant")}" placeholder="1200"></label>
+      <label>D\xE9lai de livraison<input name="delai_livraison" required value="${val("delai_livraison")}" placeholder="15 jours ouvr\xE9s"></label>
+      <label>Acompte \xE0 la signature<select name="acompte_pct">
+        ${[0, 30, 40, 50, 100].map((v) => `<option value="${v}"${v === acompte ? " selected" : ""}>${v === 0 ? "Aucun (100 % \xE0 la livraison)" : v === 100 ? "100 % \xE0 la signature" : `${v} %`}</option>`).join("")}
+      </select></label>
+      <label class="large" style="flex-direction:row;align-items:center;gap:10px">
+        <input type="checkbox" name="express" value="1" style="width:auto" ${d && d.express_prix ? "checked" : ""}
+          onchange="document.getElementById('blocExpress').style.display=this.checked?'contents':'none'">
+        Proposer une livraison express (en option)</label>
+      <div id="blocExpress" style="display:${d && d.express_prix ? "contents" : "none"}">
+        <label>D\xE9lai en express<input name="express_delai" value="${val("express_delai")}" placeholder="5 jours ouvr\xE9s"></label>
+        <label>Tarif de l'express en euros <span style="font-weight:400">(en plus du prix)</span>
+          <input name="express_prix" inputmode="decimal" value="${val("express_prix")}" placeholder="200"></label>
+      </div>
+      <label>Validit\xE9 du devis (en jours)<input name="validite_jours" type="number" min="1" max="365" step="1" required
+        value="${Number(d ? d.validite_jours : 30)}" placeholder="30"></label>
+      <label>Date du devis<input name="date_devis" type="date" required value="${val("date_devis", aujourdhui).slice(0, 10)}"></label>
+      <div></div>
+      <label class="large">Conditions particuli\xE8res <span style="font-weight:400">(facultatif)</span>
+        <textarea name="conditions" style="min-height:80px" placeholder="2 allers-retours de modifications inclus. Les contenus (textes, photos) sont fournis par le client.">${val("conditions")}</textarea></label>
+      <button class="envoyer large" type="submit">${d ? "Enregistrer les modifications" : "G\xE9n\xE9rer le devis"}</button>
+      <script>window.addEventListener("pageshow",function(){document.querySelectorAll("form[data-envoi]").forEach(function(f){delete f.dataset.envoi;var b=f.querySelector("button[type=submit]");b.disabled=false;b.textContent=${d ? '"Enregistrer les modifications"' : '"G\xE9n\xE9rer le devis"'};});});</script>
+    </form>
+    <script>
+      function remplirD(){
+        const o = document.getElementById('choixD').selectedOptions[0];
+        if(!o.value) return;
+        document.getElementById('emailD').value = o.value;
+        document.getElementById('nomD').value = o.dataset.nom || '';
+      }
+    <\/script>`;
+  }, "formulaire");
+
+  if (numero === "nouveau") {
+    return `${message || ""}${formulaire(null, "creer_devis", await clientsShopify(env))}`;
+  }
+  if (numero) {
+    const d = await lireDevis(env.DB, Number(numero));
+    if (!d) return `<div class="alerte">Devis introuvable.</div>`;
+    const num = numeroDevis(d);
+    const lien = `${url.origin}/d/${d.jeton}`;
+    const verrouille = !!d.facture_numero;
+    await assurerContratsSchema(env.DB);
+    const contrat = await lireContrat(env.DB, d.numero);
+    if (url.searchParams.get("edit")) {
+      return `${message || ""}${formulaire(d, "modifier_devis", null)}
+        <div class="actions"><a class="bouton" href="?cle=${cle}&page=devis&numero=${d.numero}">Annuler la modification</a></div>`;
+    }
+    const expire = !["accept\xE9", "factur\xE9"].includes(d.statut) && finValiditeDevis(d) < (/* @__PURE__ */ new Date()).toISOString();
+    const boutonStatut = /* @__PURE__ */ __name22((st, libelle, style = "") => `
+      <form method="POST" action="?cle=${cle}&page=devis&numero=${d.numero}&action=statut_devis&statut=${encodeURIComponent(st)}" style="display:inline">
+        <button class="envoyer" type="submit" style="${style}">${libelle}</button></form>`, "boutonStatut");
+    return `
+      ${message || ""}
+      <section><div class="grille">
+        <div class="carte neutre"><div class="k">Devis</div><div class="v txt">n\xB0 ${num}</div>
+          <div class="s">${echapper(d.titre)}</div></div>
+        <div class="carte neutre"><div class="k">Montant</div><div class="v">${euros3(d.montant)}</div>
+          <div class="s">livraison : ${echapper(d.delai_livraison)}</div></div>
+        <div class="carte ${d.statut === "accept\xE9" || d.statut === "factur\xE9" ? "bon" : d.statut === "envoy\xE9" ? "moyen" : "neutre"}">
+          <div class="k">Statut</div><div class="v txt">${echapper(d.statut)}</div>
+          <div class="s">${expire ? "validit\xE9 d\xE9pass\xE9e" : `valable jusqu'au ${dateFr(finValiditeDevis(d))}`}${d.envoye_le ? ` \xB7 envoy\xE9 le ${dateFr2(d.envoye_le)}` : ""}</div></div>
+        ${d.facture_numero ? `<div class="carte bon"><div class="k">Facture</div>
+          <div class="v txt"><a href="?cle=${cle}&page=facture&numero=${d.facture_numero}">n\xB0 ${d.facture_numero}</a></div></div>` : ""}
+      </div></section>
+
+      <section><div class="actions">
+        ${d.client_email ? `<form method="POST" action="?cle=${cle}&page=devis&numero=${d.numero}&action=envoyer_devis" style="display:inline">
+          <button class="envoyer" type="submit"
+            onclick="return confirm('Envoyer le devis n\xB0 ${num} \xE0 ${echapperJs(d.client_email)} ?')">
+            ${ic("envoi")} ${d.envoye_le ? "Renvoyer \xE0" : "Envoyer \xE0"} ${echapper(d.client_email)}</button>
+        </form>` : ""}
+        <a class="bouton" href="${lien}?telecharger=1" target="_blank" rel="noopener">T\xE9l\xE9charger le PDF</a>
+        <a class="bouton" href="${lien}" target="_blank" rel="noopener">Ouvrir / imprimer</a>
+        <a class="bouton" style="padding:13px 24px;font-size:14px"
+          href="?cle=${cle}&page=devis&numero=${d.numero}&edit=1">${ic("crayon")} Modifier</a>
+        <a class="bouton" href="?cle=${cle}&page=${contrat ? `contrats&devis=${d.numero}` : `contrats&action=creer_contrat&devis=${d.numero}`}"
+          ${contrat ? "" : `onclick="event.preventDefault();document.getElementById('fcontrat').submit()"`}>${contrat ? "Voir le contrat" : "Cr\xE9er le contrat"}</a>
+        <a class="bouton" href="?cle=${cle}&page=devis">Retour aux devis</a>
+      </div>
+      <form id="fcontrat" method="POST" action="?cle=${cle}&page=contrats&action=creer_contrat&devis=${d.numero}" style="display:none"></form>
+      <div class="actions" style="margin-top:12px">
+        ${verrouille ? "" : `${d.statut !== "accept\xE9" ? boutonStatut("accept\xE9", `${ic("valide")} Le client accepte`, "background:#3F7A34;color:#fff") : ""}
+        ${d.statut !== "refus\xE9" ? boutonStatut("refus\xE9", "Le client refuse", "background:var(--surface2);color:var(--encre)") : ""}
+        <form method="POST" action="?cle=${cle}&page=devis&numero=${d.numero}&action=facturer_devis" style="display:inline">
+          <button class="envoyer" type="submit" style="background:var(--encre);color:var(--fond)"
+            onclick="return confirm('Cr\xE9er une facture (brouillon) de ${euros3(d.montant)} \xE0 partir de ce devis ?')">
+            Transformer en facture</button></form>`}
+        <form method="POST" action="?cle=${cle}&page=devis&numero=${d.numero}&action=supprimer_devis" style="display:inline">
+          <button class="envoyer" type="submit" style="background:var(--rouge);color:#fff"
+            onclick="return confirm('Supprimer d\xE9finitivement le devis n\xB0 ${num} ?${verrouille ? ` La facture n\xB0 ${d.facture_numero} est conserv\xE9e.` : ""}')">Supprimer</button></form>
+      </div>
+      </section>
+
+      <section><h2>Aper\xE7u</h2>
+        <div class="apercu"><iframe src="${lien}" title="Devis n\xB0 ${num}"></iframe></div>
+      </section>`;
+  }
+  const { results: tousDevis = [] } = await env.DB.prepare(`SELECT numero, date_devis, validite_jours, client_nom, client_societe, client_email,
+      titre, montant, statut, facture_numero, jeton FROM devis ORDER BY numero DESC LIMIT 100`).all();
+  const somme = /* @__PURE__ */ __name22((l) => l.reduce((t, d) => t + Number(d.montant || 0), 0), "somme");
+  const enCours = tousDevis.filter((d) => d.statut === "brouillon" || d.statut === "envoy\xE9");
+  const gagnes = tousDevis.filter((d) => d.statut === "accept\xE9" || d.statut === "factur\xE9");
+  const decides = tousDevis.filter((d) => d.statut === "accept\xE9" || d.statut === "factur\xE9" || d.statut === "refus\xE9");
+  const ligne = /* @__PURE__ */ __name22((d) => `<tr>
+      <td class="nowrap"><b>${numeroDevis(d)}</b></td>
+      <td>${echapper(d.client_nom)}${d.client_societe ? `<br><span class="sec">${echapper(d.client_societe)}</span>` : ""}</td>
+      <td>${echapper(d.titre)}</td>
+      <td class="nowrap">${dateFr2(d.date_devis, false)}</td>
+      <td class="num"><b>${euros3(d.montant)}</b></td>
+      <td>${pastille(d.statut)}</td>
+      <td class="nowrap"><div style="display:flex;gap:6px;flex-wrap:wrap">
+        <a class="bouton pale" href="?cle=${cle}&page=devis&numero=${d.numero}">Ouvrir</a>
+        <a class="bouton pale" href="?cle=${cle}&page=devis&numero=${d.numero}&edit=1">${ic("crayon")} Modifier</a>
+        <a class="bouton pale" href="/d/${echapper(d.jeton)}?telecharger=1" target="_blank" rel="noopener">PDF</a>
+        <form method="POST" action="?cle=${cle}&page=devis&numero=${d.numero}&action=supprimer_devis" style="display:inline;margin:0">
+          <button class="bouton pale" type="submit" style="color:var(--rouge);cursor:pointer"
+            onclick="return confirm('Supprimer d\xE9finitivement le devis n\xB0 ${numeroDevis(d)} ?')">Supprimer</button></form>
+      </div></td>
+    </tr>`, "ligne");
+  return `
+  ${message || ""}
+  <section><div class="grille">
+    <div class="carte ${enCours.length ? "moyen" : "neutre"}"><div class="k">En attente de r\xE9ponse</div>
+      <div class="v">${euros3(somme(enCours))}</div><div class="s">${enCours.length} devis</div></div>
+    <div class="carte bon"><div class="k">Accept\xE9s</div><div class="v">${euros3(somme(gagnes))}</div>
+      <div class="s">${gagnes.length} devis</div></div>
+    <div class="carte neutre"><div class="k">Taux d'acceptation</div>
+      <div class="v">${decides.length ? Math.round(gagnes.length / decides.length * 100) + " %" : "—"}</div>
+      <div class="s">sur ${decides.length} devis tranch\xE9(s)</div></div>
+  </div></section>
+
+  <section><div class="actions" style="margin-bottom:13px">
+      <a class="bouton gros" href="?cle=${cle}&page=devis&numero=nouveau">${ic("plus")} Nouveau devis</a></div>
+    ${tableauHtml(
+    [
+      { nom: "N\xB0" },
+      { nom: "Client" },
+      { nom: "Projet" },
+      { nom: "Date", classe: "nowrap" },
+      { nom: "Montant", classe: "num" },
+      { nom: "Statut" },
+      { nom: "" }
+    ],
+    tousDevis.map(ligne),
+    "Aucun devis pour l'instant. Cliquez sur \xAB Nouveau devis \xBB, collez ce qui est inclus, et l'application le met en page.",
+    "tab-devis"
+  )}
+  </section>`;
+}
+__name22(pageDevis, "pageDevis");
+async function pageContrats(env, url, message) {
+  await assurerContratsSchema(env.DB);
+  const cle = encodeURIComponent(env.CLE_TEST);
+  const numero = Number(url.searchParams.get("devis") || 0);
+  if (numero) {
+    const c = await lireContrat(env.DB, numero);
+    const d = await lireDevis(env.DB, numero);
+    if (!c || !d) return `<div class="alerte">Contrat introuvable.</div>`;
+    const num = numeroDevis(d);
+    const lien = `${url.origin}/c/${c.jeton}`;
+    const st = statutContrat(c);
+    const act = /* @__PURE__ */ __name22((a) => `?cle=${cle}&page=contrats&devis=${numero}&action=${a}`, "act");
+    return `
+      ${message || ""}
+      <style>${STYLE_PAVE}</style>
+      <section><div class="grille">
+        <div class="carte neutre"><div class="k">Contrat</div><div class="v txt">n\xB0 ${num}</div>
+          <div class="s">${echapper(d.titre)} \xB7 ${euros3(d.montant)}</div></div>
+        <div class="carte ${c.presta_signature ? "bon" : "moyen"}"><div class="k">Votre signature</div>
+          <div class="v txt">${c.presta_signature ? "sign\xE9" : "\xE0 faire"}</div>
+          <div class="s">${c.presta_signe_le ? `le ${dateFr2(c.presta_signe_le)}` : "signez ci-dessous"}</div></div>
+        <div class="carte ${c.client_signature ? "bon" : "neutre"}"><div class="k">Signature du client</div>
+          <div class="v txt">${c.client_signature ? "sign\xE9" : "en attente"}</div>
+          <div class="s">${c.client_signe_le ? `${echapper(c.client_signataire || "")} \xB7 le ${dateFr2(c.client_signe_le)}` : c.envoye_le ? `envoy\xE9 le ${dateFr2(c.envoye_le)}` : "pas encore envoy\xE9"}</div></div>
+      </div></section>
+
+      <section><div class="actions">
+        ${c.client_signature ? "" : `${d.client_email ? `<form method="POST" action="${act("envoyer_contrat")}" style="display:inline">
+          <button class="envoyer" type="submit"
+            onclick="return confirm('Envoyer le contrat \xE0 signer \xE0 ${echapperJs(d.client_email)} ?')">
+            ${ic("envoi")} ${c.envoye_le ? "Renvoyer" : "Envoyer"} \xE0 signer \xE0 ${echapper(d.client_email)}</button></form>` : ""}
+        <button class="bouton" type="button" onclick="navigator.clipboard.writeText('${lien}').then(function(){alert('Lien de signature copi\xE9 : vous pouvez l\\'envoyer par WhatsApp ou email.')})">Copier le lien de signature</button>`}
+        <a class="bouton" href="${lien}?telecharger=1" target="_blank" rel="noopener">T\xE9l\xE9charger le PDF</a>
+        <a class="bouton" href="?cle=${cle}&page=devis&numero=${numero}">Voir le devis</a>
+        <a class="bouton" href="?cle=${cle}&page=contrats">Retour aux contrats</a>
+      </div></section>
+
+      <section><h2>${c.presta_signature ? "Votre signature" : "Signer le contrat"}</h2>
+        ${c.presta_signature ? `<img src="${echapper(c.presta_signature)}" alt="Votre signature"
+            style="height:80px;background:#fff;border:1px solid var(--trait);border-radius:9px;padding:6px 10px">
+          <details style="margin-top:10px"><summary>Refaire ma signature</summary><div class="dedans">` : ""}
+        <form method="POST" action="${act("signer_contrat")}"
+          onsubmit="if(!document.getElementById('sig').value){alert('Dessinez votre signature dans le cadre.');return false;}">
+          <p class="sec" style="margin:0 0 8px">Dessinez votre signature \xE0 la souris ou au doigt, puis validez.</p>
+          ${PAVE_SIGNATURE}
+          <button class="envoyer" type="submit" style="margin-top:12px">${ic("valide")} Signer en tant que prestataire</button>
+        </form>
+        ${c.presta_signature ? `</div></details>` : ""}
+      </section>
+
+      ${c.client_signature ? `<div class="note">Le client a sign\xE9 : le contrat ne peut plus \xEAtre modifi\xE9.</div>` : `
+      <section><details><summary>Modifier les clauses du contrat</summary><div class="dedans">
+        <form class="f" method="POST" action="${act("modifier_contrat")}" style="border:0;padding:0;background:none">
+          <label>Signataire pour le prestataire<input name="presta_nom" value="${echapper(c.presta_nom || "")}"></label>
+          <div></div>
+          <label class="large">Clauses <span style="font-weight:400">(une ligne en MAJUSCULES devient un titre d'article)</span>
+            <textarea name="clauses" style="min-height:420px">${echapper(c.clauses)}</textarea></label>
+          <p class="sec large" style="margin:-4px 0 0;font-size:12.5px">Modifier le texte annule votre signature : vous re-signez la version finale.</p>
+          <button class="envoyer large" type="submit">Enregistrer les clauses</button>
+        </form></div></details></section>`}
+
+      <section><details><summary>Supprimer ce contrat</summary><div class="dedans">
+        <form method="POST" action="${act("supprimer_contrat")}" style="display:inline">
+          <button class="envoyer" type="submit" style="background:var(--rouge);color:#fff"
+            onclick="return confirm('Supprimer le contrat n\xB0 ${num} ? Les signatures seront perdues. Le devis est conserv\xE9.')">Supprimer le contrat</button></form>
+      </div></details></section>
+
+      <section><h2>Aper\xE7u</h2>
+        <div class="apercu"><iframe src="${lien}?apercu=1" title="Contrat n\xB0 ${num}"></iframe></div>
+      </section>`;
+  }
+  const { results: lignes = [] } = await env.DB.prepare(`SELECT c.devis_numero, c.presta_signe_le, c.client_signe_le, c.envoye_le, c.jeton,
+      (c.presta_signature IS NOT NULL) AS ps, (c.client_signature IS NOT NULL) AS cs,
+      d.date_devis, d.client_nom, d.client_societe, d.titre, d.montant
+    FROM contrats c JOIN devis d ON d.numero = c.devis_numero ORDER BY c.devis_numero DESC LIMIT 100`).all();
+  const { results: sansContrat = [] } = await env.DB.prepare(`SELECT numero, date_devis, client_nom, titre, montant FROM devis
+    WHERE numero NOT IN (SELECT devis_numero FROM contrats) ORDER BY numero DESC LIMIT 100`).all();
+  const statutL = /* @__PURE__ */ __name22((l) => statutContrat({ presta_signature: l.ps, client_signature: l.cs, envoye_le: l.envoye_le }), "statutL");
+  const ligne = /* @__PURE__ */ __name22((l) => `<tr>
+      <td class="nowrap"><b>${numeroDevis({ numero: l.devis_numero })}</b></td>
+      <td>${echapper(l.client_nom)}${l.client_societe ? `<br><span class="sec">${echapper(l.client_societe)}</span>` : ""}</td>
+      <td>${echapper(l.titre)}</td>
+      <td class="num"><b>${euros3(l.montant)}</b></td>
+      <td>${pastille(statutL(l))}</td>
+      <td class="nowrap"><div style="display:flex;gap:6px;flex-wrap:wrap">
+        <a class="bouton pale" href="?cle=${cle}&page=contrats&devis=${l.devis_numero}">Ouvrir</a>
+        <a class="bouton pale" href="/c/${echapper(l.jeton)}?telecharger=1" target="_blank" rel="noopener">PDF</a>
+      </div></td>
+    </tr>`, "ligne");
+  const signes = lignes.filter((l) => l.ps && l.cs);
+  return `
+  ${message || ""}
+  <section><div class="grille">
+    <div class="carte neutre"><div class="k">Contrats</div><div class="v">${lignes.length}</div></div>
+    <div class="carte ${lignes.length - signes.length ? "moyen" : "neutre"}"><div class="k">En attente de signature</div>
+      <div class="v">${lignes.length - signes.length}</div></div>
+    <div class="carte bon"><div class="k">Sign\xE9s par les deux parties</div><div class="v">${signes.length}</div>
+      <div class="s">${euros3(signes.reduce((t, l) => t + Number(l.montant || 0), 0))}</div></div>
+  </div></section>
+
+  <section><h2>Nouveau contrat</h2>
+    ${sansContrat.length ? `<form class="f" method="POST" action="?cle=${cle}&page=contrats&action=creer_contrat">
+      <label class="large">\xC0 partir du devis
+        <select name="devis" required>
+          ${sansContrat.map((d) => `<option value="${d.numero}">n\xB0 ${numeroDevis(d)} — ${echapper(d.client_nom)} — ${echapper(d.titre)} — ${euros3(d.montant)}</option>`).join("")}
+        </select></label>
+      <button class="envoyer large" type="submit">G\xE9n\xE9rer le contrat</button>
+    </form>` : `<div class="note">Tous vos devis ont d\xE9j\xE0 un contrat. <a href="?cle=${cle}&page=devis&numero=nouveau">Cr\xE9er un devis →</a></div>`}
+  </section>
+
+  <section><h2>Mes contrats</h2>
+    ${tableauHtml(
+    [{ nom: "N\xB0" }, { nom: "Client" }, { nom: "Projet" }, { nom: "Montant", classe: "num" }, { nom: "Statut" }, { nom: "" }],
+    lignes.map(ligne),
+    "Aucun contrat pour l'instant. Choisissez un devis ci-dessus pour g\xE9n\xE9rer le premier.",
+    "tab-contrats"
+  )}</section>`;
+}
+__name22(pageContrats, "pageContrats");
 async function pageMeeting(env, url, message) {
   const cle = encodeURIComponent(env.CLE_TEST);
   const id = url.searchParams.get("id");
@@ -7209,6 +8363,9 @@ async function radarRechercheCommonCrawl(env, mot, niche, pays, identifiantMot) 
 }
 __name(radarRechercheCommonCrawl, "radarRechercheCommonCrawl");
 __name2(radarRechercheCommonCrawl, "radarRechercheCommonCrawl");
+// Les textes d'annonces Meta peuvent d\xE9passer 60 000 caract\xE8res : on n'en garde que le d\xE9but,
+// sinon la base D1 (500 Mo sur le plan gratuit) se remplit et plus rien ne peut s'y \xE9crire.
+var radarCourt = /* @__PURE__ */ __name2((t, n) => t ? String(t).slice(0, n) : null, "radarCourt");
 async function radarEnregistrerPub(db, pub, motCle, maintenant) {
   const adId = String(pub?.id || "").trim();
   const pageId = String(pub?.page_id || "").trim();
@@ -7225,10 +8382,10 @@ async function radarEnregistrerPub(db, pub, motCle, maintenant) {
     pageId,
     pub.ad_delivery_start_time || pub.ad_creation_time || null,
     pub.ad_delivery_stop_time || null,
-    radarPremierTexte(pub.ad_creative_bodies),
-    radarPremierTexte(pub.ad_creative_link_titles),
-    radarPremierTexte(pub.ad_creative_link_captions),
-    radarPremierTexte(pub.ad_creative_link_descriptions),
+    radarCourt(radarPremierTexte(pub.ad_creative_bodies), 500),
+    radarCourt(radarPremierTexte(pub.ad_creative_link_titles), 200),
+    radarCourt(radarPremierTexte(pub.ad_creative_link_captions), 200),
+    radarCourt(radarPremierTexte(pub.ad_creative_link_descriptions), 200),
     pub.ad_snapshot_url || null,
     [].concat(pub.publisher_platforms || []).join(","),
     Number(pub.eu_total_reach || 0) || null,
@@ -7761,6 +8918,75 @@ async function radarCompleterJour(db, reg) {
 }
 __name(radarCompleterJour, "radarCompleterJour");
 __name2(radarCompleterJour, "radarCompleterJour");
+var RADAR_RECHERCHE_PASSES_MAX = 12;
+function radarEtatRecherche(reg) {
+  try {
+    return reg?.brut?.recherche_manuelle ? JSON.parse(reg.brut.recherche_manuelle) : null;
+  } catch {
+    return null;
+  }
+}
+async function radarEcrireRecherche(db, etat) {
+  await db.prepare("INSERT OR REPLACE INTO radar_reglages (cle, valeur, maj_le) VALUES ('recherche_manuelle', ?, ?)").bind(JSON.stringify(etat), (/* @__PURE__ */ new Date()).toISOString()).run();
+}
+async function radarProposesAujourdhui(db) {
+  const jour = (/* @__PURE__ */ new Date()).toISOString().slice(0, 10);
+  const r = await db.prepare("SELECT COUNT(*) AS n FROM radar_prospects WHERE presente_le=? AND statut NOT IN ('non pertinent','d\xE9j\xE0 optimis\xE9')").bind(jour).first();
+  return Number(r?.n || 0);
+}
+async function radarModeAuto(db) {
+  const r = await db.prepare("SELECT valeur FROM radar_reglages WHERE cle='mode_collecte'").first().catch(() => null);
+  return r?.valeur === "auto";
+}
+async function radarDemarrerRecherche(env) {
+  const reg = await radarReglages(env.DB);
+  const etat = radarEtatRecherche(reg);
+  if (etat && !etat.fin) return { erreur: "Une recherche est d\xE9j\xE0 en cours." };
+  const trouves = await radarProposesAujourdhui(env.DB);
+  await radarEcrireRecherche(env.DB, { debut: (/* @__PURE__ */ new Date()).toISOString(), passes: 0, max: RADAR_RECHERCHE_PASSES_MAX, depart: trouves, trouves, erreurs: 0 });
+  return { ok: true };
+}
+async function radarRechercheEtape(env) {
+  try {
+    const db = env.DB;
+    const brut = await db.prepare("SELECT valeur FROM radar_reglages WHERE cle='recherche_manuelle'").first().catch(() => null);
+    if (!brut?.valeur || brut.valeur.includes('"fin"')) return;
+    const reg = await radarReglages(db);
+    const etat = radarEtatRecherche(reg);
+    if (!etat || etat.fin) return;
+    if (etat.verrou && Date.parse(etat.verrou) > Date.now()) return;
+    const terminer = /* @__PURE__ */ __name2(async () => {
+      etat.fin = (/* @__PURE__ */ new Date()).toISOString();
+      etat.verrou = null;
+      await radarEcrireRecherche(db, etat);
+    }, "terminer");
+    etat.trouves = await radarProposesAujourdhui(db);
+    if (etat.trouves >= reg.parJour || etat.passes >= etat.max) return await terminer();
+    etat.verrou = new Date(Date.now() + 4 * 6e4).toISOString();
+    await radarEcrireRecherche(db, etat);
+    const debut = Date.now();
+    try {
+      const r = await executerRadar(env);
+      if (r.bloque) {
+        etat.erreur = r.bloque;
+        return await terminer();
+      }
+      etat.dernier = radarResumeCollecte(r);
+      await noterExecution(db, "radar", Date.now() - debut, "ok", etat.dernier);
+    } catch (e) {
+      etat.erreurs = (etat.erreurs || 0) + 1;
+      await noterExecution(db, "radar", Date.now() - debut, "erreur", String(e?.message || e).slice(0, 500));
+      if (etat.erreurs >= 3) etat.erreur = String(e?.message || e).slice(0, 300);
+    }
+    etat.passes += 1;
+    etat.verrou = null;
+    etat.trouves = await radarProposesAujourdhui(db);
+    if (etat.trouves >= reg.parJour || etat.passes >= etat.max || etat.erreurs >= 3) return await terminer();
+    await radarEcrireRecherche(db, etat);
+  } catch (e) {
+    console.error("recherche manuelle radar", e?.message || e);
+  }
+}
 function radarResumeCollecte(r) {
   if (!r) return "Collecte termin\xE9e.";
   const origine = radarLibelleSource(r.source);
@@ -7977,6 +9203,10 @@ var RADAR_JR_CSS = `<style>
 .jr-point.rouge{background:var(--rouge)}
 .jr-radar-actions{margin-left:auto;display:flex;flex-wrap:wrap;gap:6px;align-items:center}
 .jr-radar-actions form{margin:0}
+.jr-recherche{display:flex;flex-wrap:wrap;align-items:center;gap:8px 14px;margin-top:12px;font-size:13px;color:var(--doux)}
+.jr-recherche form{margin:0}
+.jr-recherche button{font:inherit;font-size:14px;font-weight:600;padding:10px 18px;border-radius:9px;border:0;background:var(--encre);color:var(--surface);cursor:pointer}
+.jr-recherche button:disabled{opacity:.6;cursor:default}
 .jr-radar-actions a,.jr-radar-actions button{font:inherit;font-size:12.5px;padding:5px 11px;border-radius:7px;border:1px solid var(--trait-fort);background:var(--surface);color:var(--encre);text-decoration:none;cursor:pointer;white-space:nowrap}
 .jr-radar-actions a:hover,.jr-radar-actions button:hover{background:var(--surface3)}
 .jr-intro{margin:-4px 0 14px;font-size:13.5px;color:var(--gris)}
@@ -8170,6 +9400,9 @@ async function pageRadar(env, url, message) {
     tous2(env.DB, "SELECT quand,statut,message,duree_ms FROM executions WHERE domaine='radar' ORDER BY quand DESC LIMIT 1")
   ]);
   const executionRadar = executionsRadar[0] || null;
+  const recherche = radarEtatRecherche(reg);
+  const rechercheEnCours = !!(recherche && !recherche.fin);
+  const modeAuto = reg.brut.mode_collecte === "auto";
   const par = {};
   for (const c of compteurs) par[c.statut] = c.n;
   const totalProspects = compteurs.reduce((t, c) => t + c.n, 0);
@@ -8359,6 +9592,9 @@ async function pageRadar(env, url, message) {
       <section><h2>R\xE9glages du radar</h2>
         <form class="f" method="POST" action="?cle=${cle}&page=radar&action=radar_reglages">
           <label>Pays<input name="pays" value="${echapper(reg.pays)}"></label>
+          <label>Recherche des prospects<select name="mode_collecte">
+            <option value="manuel"${reg.brut.mode_collecte === "auto" ? "" : " selected"}>manuelle (quand je clique)</option>
+            <option value="auto"${reg.brut.mode_collecte === "auto" ? " selected" : ""}>automatique (toutes les 15 minutes)</option></select></label>
           <label>Prospects par jour<input name="prospects_par_jour" type="number" min="1" max="50" value="${reg.parJour}"></label>
           <label>Score minimum<input name="score_minimum" type="number" min="0" max="100" value="${reg.scoreMin}"></label>
           <label>Publicit\xE9s actives minimum<input name="pubs_actives_min" type="number" min="1" value="${reg.pubsMin}"></label>
@@ -8530,15 +9766,22 @@ async function pageRadar(env, url, message) {
         <span class="jr-radar-actions">
           <a href="?cle=${cle}&page=radar&vue=reglages">\u2699 R\xE9glages</a>
           <a href="?cle=${cle}&page=radar&vue=reglages#modele-email">\u270F\uFE0F Mod\xE8le d'email</a>
-          ${sourceDisponible ? `<form method="POST" action="?cle=${cle}&page=radar&action=radar_collecter"><button type="submit">\u21BB Lancer une collecte</button></form>` : ""}
         </span>
       </div>
+      ${sourceDisponible ? `<div class="jr-recherche">
+        ${rechercheEnCours ? `<meta http-equiv="refresh" content="30">
+          <button type="button" disabled>Recherche en cours\u2026</button>
+          <span>${recherche.passes} passage(s) sur ${recherche.max} \xB7 ${recherche.trouves} / ${reg.parJour} prospects du jour trouv\xE9s. La page se met \xE0 jour toute seule.</span>` : `<form method="POST" action="?cle=${cle}&page=radar&action=radar_recherche"
+            onsubmit="var b=this.querySelector('button');if(b.disabled)return false;b.disabled=true;b.textContent='Lancement\u2026';">
+            <button type="submit">\u{1F50E} Donnez-moi les prospects du jour</button></form>
+          <span>${recherche?.fin ? `Derni\xE8re recherche ${depuis(recherche.fin)} : ${Math.max(0, recherche.trouves - (recherche.depart || 0))} nouveau(x) prospect(s)${recherche.erreur ? ` \xB7 arr\xEAt\xE9e : ${echapper(recherche.erreur.replace(/[.\s]+$/, ""))}` : ""}.` : ""} ${modeAuto ? "Le radar cherche aussi tout seul toutes les 15 minutes." : "Le radar ne cherche que quand vous cliquez."}</span>`}
+      </div>` : ""}
     </section>
 
     <section><h2>Prospects du jour</h2>
       <p class="jr-intro">Class\xE9s du meilleur score au plus faible. Vous v\xE9rifiez, vous d\xE9cidez : rien ne part sans vous.</p>
       ${barreGroupe(prospects)}
-      ${prospects.length ? `<div class="jr-liste">${[...prospects].sort((a, b) => (b.score ?? 0) - (a.score ?? 0)).map(carte).join("")}</div>` : `<div class="tw"><div class="vide">${sourceDisponible ? "Aucun prospect qualifi\xE9 pour le moment. La prochaine collecte continuera la recherche." : "Le collecteur attend une connexion Gemini ou Meta."}</div></div>`}
+      ${prospects.length ? `<div class="jr-liste">${[...prospects].sort((a, b) => (b.score ?? 0) - (a.score ?? 0)).map(carte).join("")}</div>` : `<div class="tw"><div class="vide">${sourceDisponible ? (rechercheEnCours ? "Recherche en cours : les prospects apparaissent ici d\xE8s qu'ils sont qualifi\xE9s." : modeAuto ? "Aucun prospect qualifi\xE9 pour le moment. La prochaine collecte continuera la recherche." : "Aucun prospect pour le moment. Cliquez sur \xAB Donnez-moi les prospects du jour \xBB pour lancer la recherche.") : "Le collecteur attend une connexion Gemini ou Meta."}</div></div>`}
     </section>
 
     <div class="note"><b>Pas plus de prospects. De meilleurs prospects.</b>
@@ -9020,6 +10263,26 @@ var EMAILS = [
     role: "Pr\xE9vient le client qu'une facture re\xE7ue ne doit pas \xEAtre r\xE9gl\xE9e."
   },
   {
+    id: "devis_envoi",
+    nom: "Envoi d'un devis",
+    quand: "Quand vous cliquez sur \xAB Envoyer \xBB sur un devis",
+    vers: "Le client",
+    auto: false,
+    variables: ["{numero}", "{client}", "{montant}", "{titre}"],
+    objet: "Devis n\xB0 {numero} \u2014 {titre}",
+    role: "Transmet le devis au client, avec le lien vers sa version imprimable."
+  },
+  {
+    id: "contrat_envoi",
+    nom: "Envoi d'un contrat \xE0 signer",
+    quand: "Quand vous cliquez sur \xAB Envoyer \xE0 signer \xBB sur un contrat",
+    vers: "Le client",
+    auto: false,
+    variables: ["{numero}", "{client}", "{titre}"],
+    objet: "Contrat n\xB0 {numero} \xE0 signer \u2014 {titre}",
+    role: "Envoie au client le lien pour lire et signer le contrat en ligne."
+  },
+  {
     id: "meeting_invitation",
     nom: "Invitation \xE0 un rendez-vous",
     quand: "Quand vous envoyez une invitation",
@@ -9295,6 +10558,10 @@ async function application(env, url, request) {
           return retour("&err=" + encodeURIComponent(String(e.message || e)));
         }
       }
+      if (action === "radar_recherche") {
+        const r = await radarDemarrerRecherche(env);
+        return retour(r.erreur ? "&err=" + encodeURIComponent(r.erreur) : "&rrecherche=1");
+      }
       if (action === "radar_statut") {
         const pid = Number(url.searchParams.get("prospect"));
         const st = url.searchParams.get("statut") || "nouveau";
@@ -9478,6 +10745,59 @@ async function application(env, url, request) {
       const r = await enregistrerClient(env, form);
       const q = r.erreur ? `&err=${encodeURIComponent(r.erreur)}` : `&clientok=${encodeURIComponent(r.nom || "Client")}${r.brevo ? "&brevo=1" : ""}`;
       return Response.redirect(`${url.origin}/?cle=${cle}&page=clients${q}`, 303);
+    } else if (action && action.endsWith("_contrat")) {
+      const n = Number(url.searchParams.get("devis") || form.get("devis"));
+      const retour = /* @__PURE__ */ __name2((q) => Response.redirect(`${url.origin}/?cle=${cle}&page=contrats${q}`, 303), "retour");
+      const err = /* @__PURE__ */ __name2((e) => "&err=" + encodeURIComponent(e), "err");
+      const fiche = `&devis=${n}`;
+      let r;
+      if (action === "creer_contrat") {
+        r = await creerContrat(env, n);
+        return retour(r.erreur ? err(r.erreur) : `${fiche}&ccree=1`);
+      }
+      if (action === "modifier_contrat") r = await modifierContrat(env, n, form);
+      else if (action === "signer_contrat") r = await signerContratPresta(env, n, form);
+      else if (action === "envoyer_contrat") r = await envoyerContrat(env, n, url.origin);
+      else if (action === "supprimer_contrat") {
+        await assurerContratsSchema(env.DB);
+        await env.DB.prepare("DELETE FROM contrats WHERE devis_numero=?").bind(n).run();
+        return retour("&csupp=1");
+      } else return retour("");
+      if (r.erreur) return retour(fiche + err(r.erreur));
+      const ok = { modifier_contrat: "cmaj", signer_contrat: "csigne", envoyer_contrat: "cenvoye" }[action];
+      return retour(`${fiche}&${ok}=${encodeURIComponent(r.email || "1")}`);
+    } else if (action && action.endsWith("_devis")) {
+      const n = Number(url.searchParams.get("numero"));
+      const retour = /* @__PURE__ */ __name2((q) => Response.redirect(`${url.origin}/?cle=${cle}&page=devis${q}`, 303), "retour");
+      const err = /* @__PURE__ */ __name2((e) => "&err=" + encodeURIComponent(e), "err");
+      if (action === "creer_devis") {
+        const r = await creerDevis(env, form);
+        if (r.erreur) return retour(`&numero=nouveau${err(r.erreur)}`);
+        return retour(`&numero=${r.numero}&dcree=1`);
+      }
+      if (action === "modifier_devis") {
+        const r = await modifierDevis(env, n, form);
+        return retour(`&numero=${n}${r.erreur ? `&edit=1${err(r.erreur)}` : "&dmaj=1"}`);
+      }
+      if (action === "envoyer_devis") {
+        const r = await envoyerDevis(env, n, url.origin);
+        return retour(`&numero=${n}${r.erreur ? err(r.erreur) : "&denvoye=" + encodeURIComponent(r.email)}`);
+      }
+      if (action === "statut_devis") {
+        const st = url.searchParams.get("statut") || "";
+        const r = await statutDevis(env, n, st);
+        return retour(`&numero=${n}${r.erreur ? err(r.erreur) : "&dstat=" + encodeURIComponent(st)}`);
+      }
+      if (action === "facturer_devis") {
+        const r = await facturerDevis(env, n);
+        if (r.erreur) return retour(`&numero=${n}${err(r.erreur)}`);
+        return Response.redirect(`${url.origin}/?cle=${cle}&page=facture&numero=${r.numero}&cree=1`, 303);
+      }
+      if (action === "supprimer_devis") {
+        const r = await supprimerDevis(env, n);
+        return retour(r.erreur ? `&numero=${n}${err(r.erreur)}` : "&dsupp=1");
+      }
+      return retour("");
     } else if (action === "creer") {
       const r = await creerFacture(env, form);
       if (r.erreur) message = `<div class="alerte">${echapper(r.erreur)}</div>`;
@@ -9657,6 +10977,7 @@ async function application(env, url, request) {
   if (url.searchParams.get("rreg")) message = `<div class="reussite">R\xE9glages enregistr\xE9s.</div>`;
   const rcollect = url.searchParams.get("rcollect");
   if (rcollect) message = `<div class="reussite"><b>Collecte Prospect Radar termin\xE9e.</b> ${echapper(rcollect)}</div>`;
+  if (url.searchParams.get("rrecherche")) message = `<div class="reussite"><b>Recherche lanc\xE9e.</b> Le radar cherche les prospects du jour, ils s'ajoutent ici au fur et \xE0 mesure (quelques minutes).</div>`;
   if (url.searchParams.get("tache")) message = `<div class="reussite">T\xE2che ajout\xE9e.</div>`;
   if (url.searchParams.get("tmaj")) message = `<div class="reussite">T\xE2che modifi\xE9e.</div>`;
   if (url.searchParams.get("tsupp")) message = `<div class="reussite">T\xE2che supprim\xE9e.</div>`;
@@ -9665,11 +10986,24 @@ async function application(env, url, request) {
   if (url.searchParams.get("exp")) message = `<div class="reussite">Liste r\xE9cup\xE9r\xE9e aupr\xE8s de Brevo.</div>`;
   if (url.searchParams.get("attente")) message = `<div class="note">Brevo pr\xE9pare encore le fichier.
     Patientez quelques secondes et cliquez de nouveau sur \xAB V\xE9rifier maintenant \xBB.</div>`;
+  if (url.searchParams.get("dcree")) message = `<div class="reussite">Devis g\xE9n\xE9r\xE9. V\xE9rifiez l'aper\xE7u, puis envoyez-le ou t\xE9l\xE9chargez-le en PDF.</div>`;
+  if (url.searchParams.get("dmaj")) message = `<div class="reussite">Devis mis \xE0 jour.</div>`;
+  const denv = url.searchParams.get("denvoye");
+  if (denv) message = `<div class="reussite">Devis envoy\xE9 \xE0 <b>${echapper(denv)}</b>.</div>`;
+  const dstat = url.searchParams.get("dstat");
+  if (dstat) message = `<div class="reussite">Devis marqu\xE9 <b>${echapper(dstat)}</b>.</div>`;
+  if (url.searchParams.get("dsupp")) message = `<div class="reussite">Devis supprim\xE9.</div>`;
+  if (url.searchParams.get("ccree")) message = `<div class="reussite">Contrat g\xE9n\xE9r\xE9 \xE0 partir du devis. Relisez-le, signez-le, puis envoyez-le au client.</div>`;
+  if (url.searchParams.get("cmaj")) message = `<div class="reussite">Clauses enregistr\xE9es.</div>`;
+  if (url.searchParams.get("csigne")) message = `<div class="reussite">Votre signature est enregistr\xE9e sur le contrat.</div>`;
+  const cenv = url.searchParams.get("cenvoye");
+  if (cenv) message = `<div class="reussite">Contrat envoy\xE9 \xE0 <b>${echapper(cenv)}</b> pour signature.</div>`;
+  if (url.searchParams.get("csupp")) message = `<div class="reussite">Contrat supprim\xE9.</div>`;
   const err = url.searchParams.get("err");
   if (err) message = `<div class="alerte">${echapper(err)}</div>`;
   let contenu;
   try {
-    contenu = def.id === "facture" ? await pageFacture(env, url, message) : def.id === "meeting" ? await pageMeeting(env, url, message) : def.id === "google" ? await pageGoogle(env, url, message) : def.id === "analytics" ? await pageAnalytics(env, url) : def.id === "taches" ? await pageTaches(env, url, message, await clientsShopify(env), { carteHtml, dateFr: dateFr2 }) : def.id === "newsletter" ? await pageNewsletter(env, url, message) : def.id === "emails" ? await pageEmails(env, url, message) : def.id === "reglages" ? await pageReglages(env, url, message) : def.id === "radar" ? await pageRadar(env, url, message) : def.id === "blog" ? await pageBlog(env, url, message) : def.id === "prospects" ? await pageProspects(env, message) : def.id === "clients" ? await pageClients(env, url, message) : await {
+    contenu = def.id === "facture" ? await pageFacture(env, url, message) : def.id === "contrats" ? await pageContrats(env, url, message) : def.id === "devis" ? await pageDevis(env, url, message) : def.id === "meeting" ? await pageMeeting(env, url, message) : def.id === "google" ? await pageGoogle(env, url, message) : def.id === "analytics" ? await pageAnalytics(env, url) : def.id === "taches" ? await pageTaches(env, url, message, await clientsShopify(env), { carteHtml, dateFr: dateFr2 }) : def.id === "newsletter" ? await pageNewsletter(env, url, message) : def.id === "emails" ? await pageEmails(env, url, message) : def.id === "reglages" ? await pageReglages(env, url, message) : def.id === "radar" ? await pageRadar(env, url, message) : def.id === "blog" ? await pageBlog(env, url, message) : def.id === "prospects" ? await pageProspects(env, message) : def.id === "clients" ? await pageClients(env, url, message) : await {
       apercu: pageApercu,
       facturation: pageFacturation,
       journal: pageJournal
@@ -9706,10 +11040,10 @@ var index_default = {
     if (event.cron === "*/15 * * * *") {
       ctx.waitUntil(Promise.all([
         lancer("newsletter", executer2, env),
-        lancer("radar", executerRadar, env)
+        radarModeAuto(env.DB).then((auto) => auto ? lancer("radar", executerRadar, env) : null)
       ]));
     } else {
-      ctx.waitUntil(Promise.all([lancer("calendly", executer, env), smtpTestEnAttente(env), radarEnvoisProgrammes(env), radarContactsEnAttente(env), radarQualiteEnAttente(env)]));
+      ctx.waitUntil(Promise.all([lancer("calendly", executer, env), smtpTestEnAttente(env), radarEnvoisProgrammes(env), radarContactsEnAttente(env), radarQualiteEnAttente(env), radarRechercheEtape(env)]));
     }
   },
   // Déclenchement manuel, pratique pour tester sans attendre la planification.
@@ -9734,6 +11068,43 @@ var index_default = {
       if (!f) return new Response("Facture introuvable", { status: 404 });
       await chargerProfil(env);
       return new Response(gabaritFacture(f, env), {
+        headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" }
+      });
+    }
+    if (url.pathname.startsWith("/c/")) {
+      await assurerContratsSchema(env.DB);
+      const jeton = url.pathname.slice(3);
+      let c = await lireContratParJeton(env.DB, jeton);
+      if (!c) return new Response("Contrat introuvable", { status: 404 });
+      let erreur = null;
+      if (request.method === "POST") {
+        const r = await signerContratClient(env, jeton, await request.formData(), request.headers.get("cf-connecting-ip"));
+        if (!r.erreur) return Response.redirect(`${url.origin}/c/${jeton}?merci=1`, 303);
+        erreur = r.erreur;
+        c = await lireContratParJeton(env.DB, jeton);
+      }
+      const d = await lireDevis(env.DB, c.devis_numero);
+      if (!d) return new Response("Devis introuvable", { status: 404 });
+      await chargerProfil(env);
+      return new Response(gabaritContrat(c, d, env, { public: !url.searchParams.get("apercu"), erreur, merci: !!url.searchParams.get("merci") }), {
+        headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" }
+      });
+    }
+    if (url.pathname === "/logo-devis") {
+      const p = await chargerProfil(env);
+      const src = /^https?:/.test(p.profil_logo || "") ? p.profil_logo : LOGO;
+      const r = await fetch(src).catch(() => null);
+      if (!r || !r.ok) return new Response("Logo introuvable", { status: 404 });
+      return new Response(r.body, {
+        headers: { "content-type": r.headers.get("content-type") || "image/png", "cache-control": "public, max-age=86400" }
+      });
+    }
+    if (url.pathname.startsWith("/d/")) {
+      await assurerDevisSchema(env.DB);
+      const d = await lireDevisParJeton(env.DB, url.pathname.slice(3));
+      if (!d) return new Response("Devis introuvable", { status: 404 });
+      await chargerProfil(env);
+      return new Response(gabaritDevis(d, env), {
         headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" }
       });
     }
