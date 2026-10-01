@@ -7891,7 +7891,9 @@ async function assurerRadarSchema(db) {
     ["theme_perso", "INTEGER"],
     ["outils_pro", "TEXT"],
     ["qualite_exclusion", "TEXT"],
-    ["qualite_verifiee_le", "TEXT"]
+    ["qualite_verifiee_le", "TEXT"],
+    ["ia_decision", "TEXT"],
+    ["ia_analyse", "TEXT"]
   ];
   for (const [nom, type] of ajouts) {
     if (!colonnes.has(nom)) await db.prepare(`ALTER TABLE radar_prospects ADD COLUMN ${nom} ${type}`).run();
@@ -8019,7 +8021,7 @@ function radarDateMax(a, b) {
 }
 __name(radarDateMax, "radarDateMax");
 __name2(radarDateMax, "radarDateMax");
-async function radarRechercheMeta(env, mot, pays) {
+async function radarRechercheMeta(env, mot, pays, apres) {
   if (!env.META_TOKEN) throw new Error("Le jeton Meta Ad Library n'est pas encore configur\xE9.");
   const version = /^v\d+\.\d+$/.test(String(env.META_API_VERSION || "")) ? env.META_API_VERSION : "v26.0";
   const champs2 = [
@@ -8044,8 +8046,9 @@ async function radarRechercheMeta(env, mot, pays) {
       ad_active_status: "ACTIVE",
       ad_reached_countries: JSON.stringify([pays || "FR"]),
       fields: listeChamps.join(","),
-      limit: "50"
+      limit: "100"
     });
+    if (apres) params.set("after", apres);
     const reponse2 = await fetch(`https://graph.facebook.com/${version}/ads_archive?${params}`, {
       headers: { authorization: `Bearer ${env.META_TOKEN}` },
       signal: AbortSignal.timeout(25e3)
@@ -8064,7 +8067,9 @@ async function radarRechercheMeta(env, mot, pays) {
     }
     throw new Error(`Meta Ad Library${code} : ${donnees?.error?.message || `HTTP ${reponse.status}`}`);
   }
-  return Array.isArray(donnees.data) ? donnees.data : [];
+  const pubs = Array.isArray(donnees.data) ? donnees.data : [];
+  pubs.suivant = donnees?.paging?.next ? donnees?.paging?.cursors?.after || null : null;
+  return pubs;
 }
 __name(radarRechercheMeta, "radarRechercheMeta");
 __name2(radarRechercheMeta, "radarRechercheMeta");
@@ -8621,6 +8626,193 @@ async function radarMemeBoutiqueConnue(db, domaine, pageId) {
   ).first();
   return !!r;
 }
+var RADAR_IA_REGLES = "Tu es le moteur de qualification commerciale de Prospect Radar pour AdamEcom.\n\nTA MISSION\n\nIdentifier uniquement des boutiques Shopify qui repr\u00e9sentent une vraie opportunit\u00e9 commerciale pour un consultant sp\u00e9cialis\u00e9 en CRO et optimisation Shopify.\n\nJe ne cherche PAS :\n- toutes les boutiques Shopify ;\n- toutes les entreprises qui font de la publicit\u00e9 ;\n- les boutiques simplement \u201cmoches\u201d ;\n- les boutiques d\u00e9butantes sans activit\u00e9 r\u00e9elle ;\n- les grandes marques dont le site est d\u00e9j\u00e0 fortement optimis\u00e9.\n\nJe cherche le profil pr\u00e9cis suivant :\n\nUne boutique Shopify ACTIVE et suffisamment s\u00e9rieuse, qui investit d\u00e9j\u00e0 dans l\u2019acquisition payante ou montre des signes clairs d\u2019activit\u00e9 commerciale, mais dont le site pr\u00e9sente plusieurs frictions CRO visibles susceptibles de limiter la conversion.\n\nIMPORTANT :\nTu ne connais pas le taux de conversion r\u00e9el de la boutique.\nTu ne dois donc JAMAIS affirmer que \u201cla boutique ne convertit pas\u201d ou \u201cperd des ventes\u201d.\nTu dois uniquement juger les \u00e9l\u00e9ments visibles du site et parler de \u201cfrictions CRO\u201d, \u201copportunit\u00e9s d\u2019am\u00e9lioration\u201d ou \u201csignaux susceptibles de r\u00e9duire la conversion\u201d.\n\n\u00c9TAPE 1 \u2014 CONDITIONS OBLIGATOIRES\n\nLe prospect doit id\u00e9alement respecter ces conditions :\n1. La boutique utilise Shopify.\n2. Elle vend r\u00e9ellement des produits en ligne.\n3. Elle poss\u00e8de son propre nom de domaine.\n4. Elle semble encore active et entretenue.\n5. Elle diffuse actuellement des publicit\u00e9s ou poss\u00e8de des signaux r\u00e9cents et cr\u00e9dibles d\u2019acquisition payante.\n6. L\u2019activit\u00e9 semble suffisamment s\u00e9rieuse pour pouvoir investir dans une prestation professionnelle.\n7. Le site pr\u00e9sente plusieurs opportunit\u00e9s CRO concr\u00e8tes.\n\nSi la boutique ne respecte pas les crit\u00e8res 1, 2 ou 7 : REJETER.\nSi aucune preuve cr\u00e9dible de publicit\u00e9 ou d\u2019activit\u00e9 commerciale n\u2019est trouv\u00e9e : fortement r\u00e9duire le score.\n\n\u00c9TAPE 2 \u2014 ANALYSE CRO\n\nAnalyse en priorit\u00e9 : homepage ; page produit principale ; zone d\u2019achat ; panier / cart drawer ; navigation ; exp\u00e9rience mobile si disponible ; \u00e9l\u00e9ments de confiance ; offre commerciale ; preuves sociales.\n\nCherche notamment les probl\u00e8mes suivants.\n\nA. PROPOSITION DE VALEUR : proposition de valeur absente ; g\u00e9n\u00e9rique ; impossible de comprendre rapidement pourquoi acheter cette marque ; hero centr\u00e9 uniquement sur le produit sans b\u00e9n\u00e9fice client ; offre difficile \u00e0 comprendre en quelques secondes.\n\nB. PAGE PRODUIT / ABOVE THE FOLD : b\u00e9n\u00e9fices du produit peu visibles ; description uniquement technique ; CTA mal mis en avant ; prix ou variantes confus ; aucune r\u00e9assurance pr\u00e8s du CTA ; livraison ou retours difficiles \u00e0 trouver ; manque de preuves sociales pr\u00e8s de la zone d\u2019achat ; photos insuffisantes ou peu convaincantes ; absence d\u2019\u00e9l\u00e9ments permettant de comprendre rapidement le produit.\n\nC. PREUVES ET CONFIANCE : absence d\u2019avis ; tr\u00e8s peu d\u2019avis ; avis plac\u00e9s trop loin de la d\u00e9cision d\u2019achat ; absence d\u2019UGC ; absence de t\u00e9moignages cr\u00e9dibles ; garanties peu visibles ; politique livraison/retours difficile \u00e0 comprendre ; manque d\u2019\u00e9l\u00e9ments de r\u00e9assurance.\n\nD. OFFRE : aucune offre claire ; aucune diff\u00e9rence visible par rapport aux concurrents ; absence de bundle alors que le produit s\u2019y pr\u00eate ; absence d\u2019offre quantit\u00e9 lorsque pertinente ; absence d\u2019incitation \u00e0 augmenter le panier moyen ; promotions excessives qui peuvent r\u00e9duire la valeur per\u00e7ue.\n\nE. PANIER : panier Shopify tr\u00e8s basique ; absence de cross-sell ; absence d\u2019upsell pertinent ; absence de seuil de livraison offerte lorsque pertinent ; informations importantes uniquement d\u00e9couvertes tardivement ; panier peu rassurant ; parcours inutilement complexe.\n\nF. MOBILE : textes trop petits ; CTA difficilement accessible ; sections excessivement longues ; mauvaise hi\u00e9rarchie visuelle ; popups intrusives ; \u00e9l\u00e9ments cass\u00e9s ou mal align\u00e9s ; informations essentielles trop \u00e9loign\u00e9es ; page produit p\u00e9nible \u00e0 parcourir.\n\nG. BRANDING / VALEUR PER\u00c7UE : incoh\u00e9rence graphique ; visuels faibles ; photos ressemblant \u00e0 des images fournisseur ; manque d\u2019identit\u00e9 ; faible perception de qualit\u00e9 par rapport au prix demand\u00e9 ; pr\u00e9sentation g\u00e9n\u00e9rique ou interchangeable avec de nombreux concurrents.\n\n\u00c9TAPE 3 \u2014 NE PAS CONFONDRE UN D\u00c9TAIL AVEC UN PROBL\u00c8ME CRO\n\nUn seul \u00e9l\u00e9ment manquant ne suffit PAS \u00e0 qualifier la boutique.\n\u201cPas de sticky Add to Cart\u201d seul = PAS suffisant. \u201cPas de bundle\u201d seul = PAS suffisant. \u201cPeu d\u2019avis\u201d seul = PAS suffisant.\nPour consid\u00e9rer qu\u2019il existe une vraie opportunit\u00e9 CRO, trouver au minimum 3 probl\u00e8mes significatifs ET au moins 1 probl\u00e8me important concernant la page produit, la zone d\u2019achat, la confiance ou le panier.\nLes probl\u00e8mes doivent \u00eatre pr\u00e9cis et observables. Ne donne pas de points pour des suppositions.\n\n\u00c9TAPE 4 \u2014 D\u00c9TECTER LES BOUTIQUES D\u00c9J\u00c0 TR\u00c8S OPTIMIS\u00c9ES\n\nRecherche \u00e9galement les signaux POSITIFS suivants : proposition de valeur imm\u00e9diatement claire ; excellente coh\u00e9rence de marque ; tr\u00e8s bons visuels produits ; nombreux avis cr\u00e9dibles ; UGC bien int\u00e9gr\u00e9 ; avantages produits tr\u00e8s bien structur\u00e9s ; informations livraison/retour pr\u00e8s du CTA ; garanties visibles ; sticky Add to Cart correctement ex\u00e9cut\u00e9 ; bundles ; offres quantit\u00e9 ; cross-sells pertinents ; upsells pertinents ; panier tiroir avanc\u00e9 ; barre de livraison offerte ; FAQ produit ; comparaison produit ; traitement clair des objections ; navigation excellente ; pages collections travaill\u00e9es ; bonne exp\u00e9rience mobile ; storytelling solide ; excellente hi\u00e9rarchie des informations.\nSi la boutique poss\u00e8de d\u00e9j\u00e0 un grand nombre de ces \u00e9l\u00e9ments correctement ex\u00e9cut\u00e9s, consid\u00e8re qu\u2019elle est D\u00c9J\u00c0 FORTEMENT OPTIMIS\u00c9E. Dans ce cas, ne la consid\u00e8re pas comme prospect prioritaire m\u00eame si elle fait beaucoup de publicit\u00e9.\nUne forte d\u00e9pense publicitaire ne doit JAMAIS compenser l\u2019absence de besoin CRO.\n\n\u00c9TAPE 5 \u2014 \u00c9VALUER LA QUALIT\u00c9 COMMERCIALE DE L\u2019ENTREPRISE\n\nUne mauvaise boutique n\u2019est pas forc\u00e9ment un bon prospect.\nFavoriser : branding d\u00e9j\u00e0 commenc\u00e9 ; catalogue coh\u00e9rent ; domaine professionnel ; email professionnel ; activit\u00e9 r\u00e9cente ; plusieurs publicit\u00e9s ; plusieurs produits coh\u00e9rents ; pr\u00e9sence sociale r\u00e9elle ; prix permettant probablement une marge suffisante ; pages l\u00e9gales ; marque identifiable ; site r\u00e9guli\u00e8rement entretenu.\nR\u00e9duire fortement le score pour : general stores ; boutiques manifestement abandonn\u00e9es ; sites presque vides ; produits totalement incoh\u00e9rents entre eux ; contenu grossi\u00e8rement copi\u00e9 ; promotions permanentes extr\u00eamement agressives ; faux compteurs ou techniques douteuses ; domaine suspect ; absence totale d\u2019identit\u00e9 ; boutiques lanc\u00e9es tr\u00e8s r\u00e9cemment sans signe d\u2019activit\u00e9 ; projets qui semblent \u00eatre de simples tests dropshipping sans v\u00e9ritable marque.\nJe cherche une entreprise suffisamment mature pour investir dans son site, mais dont le CRO n\u2019est pas encore au niveau de son acquisition.\n\n\u00c9TAPE 6 \u2014 SCORING\n\nAttribue quatre scores ind\u00e9pendants :\nADS_SCORE /100 : force des signaux indiquant que l\u2019entreprise investit actuellement dans l\u2019acquisition.\nCRO_GAP_SCORE /100 : quantit\u00e9 ET importance des opportunit\u00e9s CRO visibles. C\u2019est le score le plus important.\nBUSINESS_FIT_SCORE /100 : l\u2019entreprise semble suffisamment s\u00e9rieuse, active et mature pour travailler avec AdamEcom.\nCONTACT_SCORE /100 : facilit\u00e9 \u00e0 identifier un d\u00e9cideur ou un moyen de contact professionnel.\nAjoute \u00e9galement CRO_MATURITY_SCORE /100 : plus il est \u00e9lev\u00e9, plus la boutique est d\u00e9j\u00e0 correctement optimis\u00e9e.\n\n\u00c9TAPE 7 \u2014 R\u00c8GLES DE D\u00c9CISION\n\nPRIORIT\u00c9 HAUTE uniquement si : ADS_SCORE >= 60 ; CRO_GAP_SCORE >= 65 ; BUSINESS_FIT_SCORE >= 55 ; au moins 3 probl\u00e8mes CRO significatifs ; au moins 1 probl\u00e8me important dans la zone d\u2019achat / page produit / confiance / panier ; CRO_MATURITY_SCORE < 75.\nPRIORIT\u00c9 MOYENNE si la boutique semble int\u00e9ressante mais certains \u00e9l\u00e9ments n\u00e9cessitent une v\u00e9rification humaine.\nREJET si : CRO_GAP_SCORE < 45 ; ou CRO_MATURITY_SCORE >= 80 ; ou aucun probl\u00e8me CRO important ; ou boutique trop immature ; ou boutique non Shopify ; ou activit\u00e9 commerciale douteuse ; ou boutique d\u00e9j\u00e0 extr\u00eamement travaill\u00e9e.\nUne boutique connue, importante ou disposant de beaucoup de publicit\u00e9s ne doit PAS automatiquement recevoir un bon score.\n\n\u00c9TAPE 8 \u2014 CALCUL DU SCORE FINAL\n\nOPPORTUNITY_SCORE = 0.20 \u00d7 ADS_SCORE + 0.50 \u00d7 CRO_GAP_SCORE + 0.20 \u00d7 BUSINESS_FIT_SCORE + 0.10 \u00d7 CONTACT_SCORE\nP\u00e9nalit\u00e9 de maturit\u00e9 : CRO_MATURITY_SCORE >= 80 : \u00d7 0.35 ; entre 70 et 79 : \u00d7 0.60 ; entre 60 et 69 : \u00d7 0.80.\n\n\u00c9TAPE 9 \u2014 CLASSIFICATION\n\n75 \u00e0 100 : HOT_PROSPECT. 60 \u00e0 74 : MANUAL_REVIEW. 0 \u00e0 59 : REJECT.\nUne boutique ne peut jamais \u00eatre HOT_PROSPECT si CRO_GAP_SCORE < 65.\n\n\u00c9TAPE 10 \u2014 JUSTIFICATION\n\nPour chaque boutique retenue, donne exactement les 3 \u00e0 5 meilleures raisons observables qui justifient la prospection. Les raisons doivent \u00eatre sp\u00e9cifiques.\nMAUVAIS : \u201cLe site pourrait \u00eatre am\u00e9lior\u00e9.\u201d\nBON : \u201cLes avis clients sont absents de la zone d\u2019achat de la page produit.\u201d\nBON : \u201cLes informations de livraison ne sont pas visibles \u00e0 proximit\u00e9 du bouton Ajouter au panier.\u201d\nBON : \u201cLe panier ne propose aucun produit compl\u00e9mentaire malgr\u00e9 un catalogue compatible avec le cross-sell.\u201d\nNe jamais inventer un probl\u00e8me.\n\nDERNI\u00c8RE R\u00c8GLE\n\nLa qualit\u00e9 est plus importante que la quantit\u00e9. Sois s\u00e9v\u00e8re.\nEn cas de doute entre HOT_PROSPECT et MANUAL_REVIEW : choisis MANUAL_REVIEW.\nEn cas de doute entre MANUAL_REVIEW et REJECT : choisis REJECT.";
+var RADAR_IA_ZONES_ACHAT = ["product_page", "buy_box", "trust", "cart"];
+function radarTexteVisible(html, max) {
+  return String(html || "").replace(/<script[\s\S]*?<\/script>/gi, " ").replace(/<style[\s\S]*?<\/style>/gi, " ").replace(/<noscript[\s\S]*?<\/noscript>/gi, " ").replace(/<svg[\s\S]*?<\/svg>/gi, " ").replace(/<(h[1-6]|button|li|p|div|section|a)\b[^>]*>/gi, "\n").replace(/<[^>]+>/g, " ").replace(/&nbsp;/g, " ").replace(/&amp;/g, "&").replace(/&#39;|&rsquo;/g, "'").replace(/&quot;/g, '"').replace(/[ \t]+/g, " ").replace(/\s*\n\s*/g, "\n").replace(/\n{2,}/g, "\n").trim().slice(0, max);
+}
+async function radarChargerPageProduit(domaine, html) {
+  const liens = [...String(html || "").matchAll(/href=["'](?:https?:\/\/[^"'/]+)?(\/(?:[a-z]{2}(?:-[a-z]{2})?\/)?products\/[a-z0-9][a-z0-9\-_%]*)["'?#]/gi)].map((m) => m[1]);
+  const lien = liens.find((l) => !/\.(js|json|oembed)$/i.test(l));
+  if (!lien) return null;
+  try {
+    const reponse = await fetch(`https://${domaine}${lien}`, {
+      redirect: "follow",
+      headers: { accept: "text/html", "accept-language": "fr-FR,fr;q=0.9", "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0 Safari/537.36" },
+      signal: AbortSignal.timeout(12e3)
+    });
+    if (!reponse.ok) return null;
+    return { url: `https://${domaine}${lien}`, html: (await reponse.text()).slice(0, 15e5) };
+  } catch {
+    return null;
+  }
+}
+function radarIaScore(n) {
+  const v = Math.round(Number(n));
+  return Number.isFinite(v) ? Math.max(0, Math.min(100, v)) : 0;
+}
+function radarIaDecision(r, shopifyOui) {
+  const ads = radarIaScore(r.ads_score), gap = radarIaScore(r.cro_gap_score), fit = radarIaScore(r.business_fit_score);
+  const contact = radarIaScore(r.contact_score), maturite = radarIaScore(r.cro_maturity_score);
+  let score = 0.2 * ads + 0.5 * gap + 0.2 * fit + 0.1 * contact;
+  if (maturite >= 80) score *= 0.35;
+  else if (maturite >= 70) score *= 0.6;
+  else if (maturite >= 60) score *= 0.8;
+  score = Math.round(score);
+  const problemes = (Array.isArray(r.main_cro_issues) ? r.main_cro_issues : []).filter((i) => i && String(i.issue || "").trim());
+  const significatifs = problemes.filter((i) => i.severity === "high" || i.severity === "medium");
+  const achat = significatifs.some((i) => RADAR_IA_ZONES_ACHAT.includes(i.location));
+  let decision = score >= 75 ? "HOT_PROSPECT" : score >= 60 ? "MANUAL_REVIEW" : "REJECT";
+  const raisonsRejet = [];
+  if (!shopifyOui || r.shopify_confirmed === false) raisonsRejet.push("boutique non Shopify");
+  if (gap < 45) raisonsRejet.push("peu d'opportunit\xE9s CRO visibles");
+  if (maturite >= 80) raisonsRejet.push("boutique d\xE9j\xE0 tr\xE8s optimis\xE9e");
+  if (!achat) raisonsRejet.push("aucun probl\xE8me important sur la page produit, la confiance ou le panier");
+  if (significatifs.length < 3) raisonsRejet.push("moins de 3 probl\xE8mes CRO significatifs");
+  if (r.decision === "REJECT") raisonsRejet.push(String(r.rejection_reason || "rejet\xE9e par l'analyse").slice(0, 200));
+  if (raisonsRejet.length) decision = "REJECT";
+  else if (decision === "HOT_PROSPECT" && !(ads >= 60 && gap >= 65 && fit >= 55 && maturite < 75 && r.decision === "HOT_PROSPECT")) decision = "MANUAL_REVIEW";
+  return { decision, score, raisonRejet: raisonsRejet[0] || (decision === "REJECT" ? `score d'opportunit\xE9 insuffisant (${score}/100)` : null), ads, gap, fit, contact, maturite };
+}
+async function radarQualifierIa(env, contexte) {
+  const schema = {
+    type: "object",
+    properties: {
+      decision: { type: "string", enum: ["HOT_PROSPECT", "MANUAL_REVIEW", "REJECT"] },
+      opportunity_score: { type: "integer" },
+      ads_score: { type: "integer" },
+      cro_gap_score: { type: "integer" },
+      cro_maturity_score: { type: "integer" },
+      business_fit_score: { type: "integer" },
+      contact_score: { type: "integer" },
+      shopify_confirmed: { type: "boolean" },
+      paid_ads_detected: { type: "boolean" },
+      main_cro_issues: {
+        type: "array",
+        items: {
+          type: "object",
+          properties: {
+            issue: { type: "string" },
+            severity: { type: "string", enum: ["high", "medium", "low"] },
+            location: { type: "string", enum: ["homepage", "product_page", "buy_box", "cart", "mobile", "navigation", "trust"] }
+          },
+          required: ["issue", "severity", "location"]
+        }
+      },
+      positive_cro_signals: { type: "array", items: { type: "string" } },
+      business_quality_signals: { type: "array", items: { type: "string" } },
+      rejection_reason: { type: "string" },
+      outreach_angles: { type: "array", items: { type: "string" } },
+      summary: { type: "string" }
+    },
+    required: ["decision", "opportunity_score", "ads_score", "cro_gap_score", "cro_maturity_score", "business_fit_score", "contact_score", "shopify_confirmed", "paid_ads_detected", "main_cro_issues", "positive_cro_signals", "business_quality_signals", "rejection_reason", "outreach_angles", "summary"]
+  };
+  const input = `${RADAR_IA_REGLES}
+
+==================================================
+CE QUE TU PEUX OBSERVER POUR CETTE BOUTIQUE
+==================================================
+
+Tu re\xE7ois le texte visible de la page d'accueil et d'une page produit, extrait du HTML, ainsi que des signaux d\xE9tect\xE9s automatiquement. Tu ne vois ni les images ni le rendu mobile ni le panier rempli : ne juge pas ce que tu ne peux pas observer (visuels, mobile, panier) et ne compte aucun probl\xE8me suppos\xE9. R\xE9dige tout en fran\xE7ais. Retourne uniquement le JSON demand\xE9 (decision, opportunity_score, ads_score, cro_gap_score, cro_maturity_score, business_fit_score, contact_score, shopify_confirmed, paid_ads_detected, main_cro_issues, positive_cro_signals, business_quality_signals, rejection_reason, outreach_angles, summary).
+
+${contexte}`;
+  const essais = [env.GEMINI_QUALIF_MODEL, "gemini-3.7-flash", "gemini-3.5-flash", "gemini-3.7-flash", "gemini-3.5-flash-lite"].filter(Boolean);
+  let payload = null, derniereErreur = "";
+  for (const [n, modele] of essais.entries()) {
+    if (n > 0) await new Promise((r) => setTimeout(r, 1500));
+    const reponse = await fetch("https://generativelanguage.googleapis.com/v1beta/interactions", {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-goog-api-key": env.GEMINI_API_KEY },
+      body: JSON.stringify({ model: modele, input, response_format: { type: "text", mime_type: "application/json", schema } }),
+      signal: AbortSignal.timeout(6e4)
+    }).catch((e) => ({ ok: false, status: 0, json: async () => ({ message: String(e?.message || e) }) }));
+    const corps = await reponse.json().catch(() => null);
+    if (reponse.ok) {
+      payload = corps;
+      break;
+    }
+    derniereErreur = erreurInteractionGemini(corps);
+    if (![0, 404, 429, 500, 503].includes(reponse.status) && !/demand|overload|unavailable|quota|not found|no longer available/i.test(derniereErreur)) break;
+  }
+  if (!payload) throw new Error(`Analyse IA : ${derniereErreur}`);
+  const texte = texteInteractionGemini(payload);
+  try {
+    return JSON.parse(texte);
+  } catch {
+    throw new Error("Analyse IA : r\xE9ponse illisible.");
+  }
+}
+function radarContexteIa(annonceur, site, produit, technos, avis, qualite, contacts) {
+  const croAccueil = radarSignauxCro(site.html), croProduit = produit ? radarSignauxCro(produit.html) : {};
+  const oui = (o) => Object.entries(o).filter(([, v]) => v).map(([k]) => k).join(", ") || "aucun";
+  const pub = radarEstSourceWeb(annonceur.source) ? `Boutique trouv\xE9e par recherche web (${radarLibelleSource(annonceur.source)}) : aucune publicit\xE9 Meta observ\xE9e directement.` : `Meta Ad Library : ${annonceur.pubsActives || 0} publicit\xE9(s) active(s)${annonceur.premierePub ? `, premi\xE8re pub vue le ${String(annonceur.premierePub).slice(0, 10)}` : ""}${annonceur.portee ? `, port\xE9e UE ${annonceur.portee}` : ""}.`;
+  return `Boutique : ${annonceur.nom || annonceur.domaine}
+Domaine : ${annonceur.domaine}
+Acquisition : ${pub}
+Outils d\xE9tect\xE9s dans le code : ${technos.filter((t) => t.detecte).map((t) => t.nom).join(", ") || "aucun"}${qualite.outils?.length ? ", " + qualite.outils.join(", ") : ""}
+Th\xE8me Shopify : ${qualite.theme || "inconnu"}${qualite.themePerso ? " (personnalis\xE9)" : ""}
+Nombre d'avis d\xE9tect\xE9 : ${avis || 0}
+Contacts trouv\xE9s : ${contacts || "aucun sur la page d'accueil"}
+Signaux CRO pr\xE9sents (accueil) : ${oui(croAccueil)}
+Signaux CRO pr\xE9sents (page produit) : ${produit ? oui(croProduit) : "page produit non trouv\xE9e"}
+
+--- TEXTE DE LA PAGE D'ACCUEIL ---
+${radarTexteVisible(site.html, 7e3)}
+
+--- TEXTE DE LA PAGE PRODUIT${produit ? ` (${produit.url})` : ""} ---
+${produit ? radarTexteVisible(produit.html, 9e3) : "Aucune page produit trouv\xE9e depuis l'accueil."}`;
+}
+function radarIaResume(r, d) {
+  const liste = (a, n, max) => (Array.isArray(a) ? a : []).slice(0, n).map((x) => String(x).slice(0, max));
+  return JSON.stringify({
+    decision: d.decision,
+    score: d.score,
+    ads: d.ads,
+    gap: d.gap,
+    fit: d.fit,
+    contact: d.contact,
+    maturite: d.maturite,
+    pubs: !!r.paid_ads_detected,
+    problemes: (Array.isArray(r.main_cro_issues) ? r.main_cro_issues : []).slice(0, 6).map((i) => ({ p: String(i.issue || "").slice(0, 220), g: i.severity, z: i.location })),
+    positifs: liste(r.positive_cro_signals, 5, 120),
+    business: liste(r.business_quality_signals, 4, 120),
+    angles: liste(r.outreach_angles, 3, 220),
+    resume: String(r.summary || "").slice(0, 500),
+    rejet: d.raisonRejet
+  });
+}
+var RADAR_IA_LIBELLES = { HOT_PROSPECT: ["\u{1F525} Prospect chaud", "vert"], MANUAL_REVIEW: ["\u{1F50D} \xC0 v\xE9rifier", "jaune"], REJECT: ["Rejet\xE9", "rouge"] };
+var RADAR_IA_ZONES = { homepage: "accueil", product_page: "page produit", buy_box: "zone d'achat", cart: "panier", mobile: "mobile", navigation: "navigation", trust: "confiance" };
+function radarIaBloc(p, complet) {
+  const a = radarIaLire(p);
+  if (!a) return p?.ia_decision === "ERREUR" && complet ? `<div class="alerte">Analyse IA impossible : ${echapper(p.derniere_erreur || "erreur inconnue")}</div>` : "";
+  const [lib, ton] = RADAR_IA_LIBELLES[a.decision] || [a.decision, ""];
+  const problemes = (a.problemes || []).filter((x) => x.g !== "low");
+  if (!complet) {
+    return `<div class="jr-ia"><span class="jr-tag ${ton}">${lib}</span>
+      ${problemes.length ? `<ul>${problemes.slice(0, 3).map((x) => `<li>${echapper(x.p)}</li>`).join("")}</ul>` : ""}
+      ${a.angles?.[0] ? `<div class="sec">Angle d'approche : ${echapper(a.angles[0])}</div>` : ""}</div>`;
+  }
+  const ligne = (k, v) => `<tr><td>${k}</td><td><b>${v}</b>/100</td></tr>`;
+  return `<section><h2>Analyse IA</h2>
+    <p><span class="jr-tag ${ton}">${lib}</span> Score d'opportunit\xE9 <b>${a.score}</b>/100${a.rejet ? ` \xB7 ${echapper(a.rejet)}` : ""}</p>
+    ${a.resume ? `<p>${echapper(a.resume)}</p>` : ""}
+    <div class="tw"><table><tbody>
+      ${ligne("Opportunit\xE9s CRO (le plus important)", a.gap)}${ligne("Publicit\xE9 / acquisition", a.ads)}${ligne("S\xE9rieux de l'entreprise", a.fit)}${ligne("Contact", a.contact)}${ligne("Maturit\xE9 CRO (\xE9lev\xE9 = d\xE9j\xE0 optimis\xE9e)", a.maturite)}
+    </tbody></table></div>
+    ${(a.problemes || []).length ? `<h3>Frictions CRO observ\xE9es</h3><ul>${a.problemes.map((x) => `<li><b>${x.g === "high" ? "Important" : x.g === "medium" ? "Moyen" : "Mineur"}</b> \xB7 ${echapper(RADAR_IA_ZONES[x.z] || x.z || "")} : ${echapper(x.p)}</li>`).join("")}</ul>` : ""}
+    ${(a.angles || []).length ? `<h3>Angles d'approche</h3><ul>${a.angles.map((x) => `<li>${echapper(x)}</li>`).join("")}</ul>` : ""}
+    ${(a.positifs || []).length ? `<h3>D\xE9j\xE0 bien fait</h3><ul>${a.positifs.map((x) => `<li>${echapper(x)}</li>`).join("")}</ul>` : ""}
+    ${(a.business || []).length ? `<h3>Signaux business</h3><ul>${a.business.map((x) => `<li>${echapper(x)}</li>`).join("")}</ul>` : ""}
+  </section>`;
+}
+function radarIaLire(p) {
+  try {
+    return p?.ia_analyse ? JSON.parse(p.ia_analyse) : null;
+  } catch {
+    return null;
+  }
+}
 async function radarAnalyserAnnonceur(env, annonceur, reg) {
   const db = env.DB;
   const maintenant = (/* @__PURE__ */ new Date()).toISOString();
@@ -8641,7 +8833,7 @@ async function radarAnalyserAnnonceur(env, annonceur, reg) {
     if (annonceur.pertinenceIndex) pertinence.confiance = Math.max(60, pertinence.confiance);
     const [rdap, pagespeed] = await Promise.all([
       radarLireRdap(annonceur.domaine),
-      reg.brut.pagespeed_actif === "0" ? null : radarLirePageSpeed(env, annonceur.domaine)
+      reg.brut.pagespeed_actif === "0" || !env.PAGESPEED_API_KEY ? null : radarLirePageSpeed(env, annonceur.domaine)
     ]);
     const temporaire = {
       source: annonceur.source || "meta",
@@ -8668,7 +8860,27 @@ async function radarAnalyserAnnonceur(env, annonceur, reg) {
     const marcheValide = !sourceWeb || marche.statut === "oui";
     const nicheValide = !sourceWeb || pertinence.confiance >= 60;
     const qualite = radarEvaluerQualite(site.html, annonceur.pubsActives, temporaire.nombre_avis, reg.pays);
-    const qualifie = !qualite.exclusion && resultatScore.score >= reg.scoreMin && activiteValide && marcheValide && nicheValide && (!reg.shopifyObligatoire || shopify2.statut === "oui");
+    let qualifie = !qualite.exclusion && resultatScore.score >= reg.scoreMin && activiteValide && marcheValide && nicheValide && (!reg.shopifyObligatoire || shopify2.statut === "oui");
+    let ia = null;
+    const activiteIa = sourceWeb || annonceur.pubsActives >= reg.pubsMin;
+    if (env.GEMINI_API_KEY && !qualite.exclusion && activiteIa && marcheValide && nicheValide && shopify2.statut === "oui") {
+      try {
+        const produit = await radarChargerPageProduit(annonceur.domaine, site.html);
+        const contactsAccueil = radarExtraireContacts(site.html, annonceur.domaine);
+        const contactsTexte = [...(contactsAccueil.emails || []).slice(0, 2), contactsAccueil.telephone, contactsAccueil.instagram && "Instagram @" + contactsAccueil.instagram].filter(Boolean).join(", ");
+        const brutIa = await radarQualifierIa(env, radarContexteIa(annonceur, site, produit, technos, temporaire.nombre_avis, qualite, contactsTexte));
+        const d = radarIaDecision(brutIa, shopify2.statut === "oui");
+        ia = { decision: d.decision, score: d.score, json: radarIaResume(brutIa, d), rejet: d.raisonRejet };
+        resultatScore.score = d.score;
+        qualifie = d.decision !== "REJECT";
+        if (d.decision === "REJECT") qualite.exclusion = { statut: "non pertinent", motif: `auto : IA, ${d.raisonRejet || "pas d'opportunit\xE9 CRO suffisante"}`.slice(0, 200) };
+      } catch (e) {
+        ia = { decision: "ERREUR", score: null, json: null, rejet: String(e?.message || e).slice(0, 300) };
+        qualifie = false;
+      }
+    } else if (env.GEMINI_API_KEY) {
+      qualifie = false;
+    }
     await db.prepare(`INSERT INTO radar_prospects
       (page_id,source,source_url,marque,domaine,domaine_confiance,domaine_methode,domaine_cree_le,registrar,pays,
        marche_statut,marche_confiance,marche_preuves,niche,pertinence_niche,categorie,
@@ -8725,6 +8937,7 @@ async function radarAnalyserAnnonceur(env, annonceur, reg) {
       technos.filter((t) => t.detecte).length
     ).run();
     const prospect = await db.prepare("SELECT id, statut, presente_le FROM radar_prospects WHERE page_id=?").bind(annonceur.pageId).first();
+    if (prospect?.id && ia) await db.prepare("UPDATE radar_prospects SET ia_decision=?, ia_analyse=?, derniere_erreur=? WHERE id=?").bind(ia.decision, ia.json, ia.decision === "ERREUR" ? ia.rejet : null, prospect.id).run();
     if (prospect?.id) await radarEnregistrerQualite(db, prospect, qualite);
     if (prospect?.id && qualifie) await radarEnregistrerContacts(db, prospect.id, annonceur.domaine, site.html);
     if (prospect?.id) {
@@ -8737,7 +8950,7 @@ async function radarAnalyserAnnonceur(env, annonceur, reg) {
         ).run();
       }
     }
-    return { analyse: true, qualifie, score: resultatScore.score };
+    return { analyse: true, qualifie, score: resultatScore.score, ia: ia?.decision || null, iaErreur: ia?.decision === "ERREUR" ? ia.rejet : null };
   } catch (e) {
     const erreur = String(e?.message || e).slice(0, 500);
     await db.prepare(`INSERT INTO radar_prospects
@@ -8787,7 +9000,9 @@ async function executerRadar(env, objectifJour) {
   let candidatsWeb = [];
   if (source === "meta") {
     try {
-      pubs = await radarRechercheMeta(env, motCle.mot, reg.pays);
+      const cleCurseur = `meta_curseur_${motCle.id}`;
+      pubs = await radarRechercheMeta(env, motCle.mot, reg.pays, reg.brut[cleCurseur] || null);
+      await db.prepare("INSERT OR REPLACE INTO radar_reglages (cle, valeur, maj_le) VALUES (?, ?, ?)").bind(cleCurseur, pubs.suivant || "", maintenant).run();
       if (!pubs.length) {
         source = env.GEMINI_API_KEY ? "google_gemini" : "web_brave";
         avertissements.push("Meta n'a renvoy\xE9 aucune annonce pour ce mot-cl\xE9.");
@@ -8876,7 +9091,8 @@ async function executerRadar(env, objectifJour) {
          premiere_pub_vue=CASE WHEN radar_annonceurs.premiere_pub_vue IS NULL OR excluded.premiere_pub_vue < radar_annonceurs.premiere_pub_vue THEN excluded.premiere_pub_vue ELSE radar_annonceurs.premiere_pub_vue END,
          derniere_pub_vue=CASE WHEN radar_annonceurs.derniere_pub_vue IS NULL OR excluded.derniere_pub_vue > radar_annonceurs.derniere_pub_vue THEN excluded.derniere_pub_vue ELSE radar_annonceurs.derniere_pub_vue END,
          pubs_actives=excluded.pubs_actives,portee_ue=MAX(COALESCE(radar_annonceurs.portee_ue,0),COALESCE(excluded.portee_ue,0)),
-         niche=COALESCE(radar_annonceurs.niche,excluded.niche),maj_le=excluded.maj_le`).bind(
+         niche=COALESCE(radar_annonceurs.niche,excluded.niche),maj_le=excluded.maj_le
+        RETURNING premiere_pub_vue`).bind(
         annonceur.pageId,
         annonceur.nom,
         annonceur.premierePub,
@@ -8887,19 +9103,34 @@ async function executerRadar(env, objectifJour) {
         annonceur.niche,
         maintenant,
         maintenant
-      ).run();
+      ).first().then((h) => {
+        if (h?.premiere_pub_vue) annonceur.premierePub = radarDateMin(annonceur.premierePub, h.premiere_pub_vue);
+      });
     }
   }
-  const limite = Math.max(1, Math.min(10, Number(reg.brut.candidats_par_passage || 5)));
-  const candidats = [...groupes.values()].filter((a) => a.domaine).sort((a, b) => b.pubsActives - a.pubsActives).slice(0, limite);
+  const limite = Math.max(1, Math.min(env.GEMINI_API_KEY ? 3 : 10, Number(reg.brut.candidats_par_passage || 5)));
+  const avecDomaine = [...groupes.values()].filter((a) => a.domaine);
+  const deja = /* @__PURE__ */ new Set();
+  for (let i = 0; i < avecDomaine.length; i += 40) {
+    const lot = avecDomaine.slice(i, i + 40);
+    const marques = lot.map(() => "?").join(",");
+    const connus = await tous2(db, `SELECT page_id, domaine FROM radar_prospects
+      WHERE (domaine IN (${marques}) OR page_id IN (${marques}))
+        AND (presente_le IS NOT NULL OR ia_decision IN ('HOT_PROSPECT','MANUAL_REVIEW','REJECT') OR statut<>'nouveau' OR julianday('now')-julianday(cree_le)>30)`, ...lot.map((a) => a.domaine), ...lot.map((a) => a.pageId));
+    for (const c of connus) deja.add(c.domaine).add(c.page_id);
+  }
+  const candidats = avecDomaine.filter((a) => !deja.has(a.domaine) && !deja.has(a.pageId)).sort((a, b) => b.pubsActives - a.pubsActives).slice(0, limite);
   let analyses = 0;
   let qualifies = 0;
+  let iaRejets = 0;
   for (const candidat of candidats) {
     const r = await radarAnalyserAnnonceur(env, candidat, reg);
     if (r.analyse) analyses += 1;
     if (r.qualifie) qualifies += 1;
+    if (r.ia === "REJECT") iaRejets += 1;
+    if (r.iaErreur && !avertissements.some((a) => a.startsWith("Analyse IA"))) avertissements.push(r.iaErreur);
   }
-  qualifies += await radarCompleterJour(db, reg);
+  qualifies += await radarCompleterJour(db, reg, !!env.GEMINI_API_KEY);
   return {
     source,
     motCle: motCle.mot,
@@ -8908,12 +9139,13 @@ async function executerRadar(env, objectifJour) {
     annonceurs: groupes.size,
     analyses,
     qualifies,
+    iaRejets,
     avertissement: avertissements.join(" | ") || null
   };
 }
 __name(executerRadar, "executerRadar");
 __name2(executerRadar, "executerRadar");
-async function radarCompleterJour(db, reg) {
+async function radarCompleterJour(db, reg, exigerIa = false) {
   const jour = (/* @__PURE__ */ new Date()).toISOString().slice(0, 10);
   const deja = await db.prepare("SELECT COUNT(*) AS n FROM radar_prospects WHERE presente_le=? AND statut NOT IN ('non pertinent','d\xE9j\xE0 optimis\xE9')").bind(jour).first();
   const manque = reg.parJour - Number(deja?.n || 0);
@@ -8925,19 +9157,22 @@ async function radarCompleterJour(db, reg) {
         AND (source IN ('google_gemini','web_brave','common_crawl') OR (COALESCE(source,'meta')='meta' AND pubs_actives>=?
           AND (premiere_pub_vue IS NULL OR julianday('now')-julianday(premiere_pub_vue)>=?)))
         AND (?=0 OR shopify_statut='oui')
-      ORDER BY score DESC, id DESC LIMIT ?)`).bind(
+        AND (?=0 OR ia_decision IN ('HOT_PROSPECT','MANUAL_REVIEW'))
+      ORDER BY ia_decision='HOT_PROSPECT' DESC, score DESC, id DESC LIMIT ?)`).bind(
     jour,
-    reg.scoreComplement,
+    exigerIa ? 60 : reg.scoreComplement,
     reg.pubsMin,
     reg.pubAncienneteMin,
     reg.shopifyObligatoire ? 1 : 0,
+    exigerIa ? 1 : 0,
     manque
   ).run();
   return Number(r?.meta?.changes || 0);
 }
 __name(radarCompleterJour, "radarCompleterJour");
 __name2(radarCompleterJour, "radarCompleterJour");
-var RADAR_RECHERCHE_PASSES_MAX = 12;
+var RADAR_RECHERCHE_PASSES_MAX = 400;
+var RADAR_PASSES_PAR_JOUR = 150;
 function radarEtatRecherche(reg) {
   try {
     return reg?.brut?.recherche_manuelle ? JSON.parse(reg.brut.recherche_manuelle) : null;
@@ -8982,6 +9217,18 @@ async function radarRechercheEtape(env) {
     const objectif = (etat.depart || 0) + reg.parJour;
     etat.trouves = await radarProposesAujourdhui(db);
     if (etat.trouves >= objectif || etat.passes >= etat.max) return await terminer();
+    const jour = (/* @__PURE__ */ new Date()).toISOString().slice(0, 10);
+    let compteur = {};
+    try {
+      compteur = JSON.parse(reg.brut.recherche_jour || "{}");
+    } catch {
+    }
+    const passesJour = compteur.jour === jour ? Number(compteur.passes || 0) : 0;
+    if (passesJour >= RADAR_PASSES_PAR_JOUR) {
+      etat.erreur = `limite de ${RADAR_PASSES_PAR_JOUR} passages par jour atteinte (protection de l'app), relancez demain`;
+      return await terminer();
+    }
+    await db.prepare("INSERT OR REPLACE INTO radar_reglages (cle, valeur, maj_le) VALUES ('recherche_jour', ?, ?)").bind(JSON.stringify({ jour, passes: passesJour + 1 }), (/* @__PURE__ */ new Date()).toISOString()).run();
     etat.verrou = new Date(Date.now() + 4 * 6e4).toISOString();
     await radarEcrireRecherche(db, etat);
     const debut = Date.now();
@@ -8992,6 +9239,7 @@ async function radarRechercheEtape(env) {
         return await terminer();
       }
       etat.dernier = radarResumeCollecte(r);
+      etat.erreurs = 0;
       await noterExecution(db, "radar", Date.now() - debut, "ok", etat.dernier);
     } catch (e) {
       etat.erreurs = (etat.erreurs || 0) + 1;
@@ -9012,7 +9260,7 @@ function radarResumeCollecte(r) {
   const origine = radarLibelleSource(r.source);
   const unite = r.source === "meta" ? "annonce(s)" : "boutique(s) trouv\xE9e(s)";
   const secours = r.avertissement ? " \xB7 source de secours utilis\xE9e" : "";
-  return `${origine} \xB7 ${r.motCle} : ${r.resultats ?? r.annonces ?? 0} ${unite}, ${r.annonceurs || 0} candidat(s), ${r.analyses || 0} analyse(s), ${r.qualifies || 0} qualifi\xE9(s)${secours}`;
+  return `${origine} \xB7 ${r.motCle} : ${r.resultats ?? r.annonces ?? 0} ${unite}, ${r.annonceurs || 0} candidat(s), ${r.analyses || 0} analyse(s), ${r.qualifies || 0} retenu(s)${r.iaRejets ? `, ${r.iaRejets} rejet\xE9(s) par l'IA` : ""}${secours}`;
 }
 __name(radarResumeCollecte, "radarResumeCollecte");
 __name2(radarResumeCollecte, "radarResumeCollecte");
@@ -9225,8 +9473,12 @@ var RADAR_JR_CSS = `<style>
 .jr-radar-actions form{margin:0}
 .jr-recherche{display:flex;flex-wrap:wrap;align-items:center;gap:8px 14px;margin-top:12px;font-size:13px;color:var(--doux)}
 .jr-recherche form{margin:0}
+.jr-ia{margin:6px 0 2px;font-size:13px}
+.jr-ia ul{margin:6px 0 4px;padding-left:18px}
+.jr-ia li{margin:2px 0}
 .jr-recherche button{font:inherit;font-size:14px;font-weight:600;padding:10px 18px;border-radius:9px;border:0;background:var(--encre);color:var(--surface);cursor:pointer}
 .jr-recherche button:disabled{opacity:.6;cursor:default}
+.jr-recherche button.discret{background:transparent;color:var(--doux);border:1px solid var(--trait-fort);font-weight:500;padding:8px 14px}
 .jr-radar-actions a,.jr-radar-actions button{font:inherit;font-size:12.5px;padding:5px 11px;border-radius:7px;border:1px solid var(--trait-fort);background:var(--surface);color:var(--encre);text-decoration:none;cursor:pointer;white-space:nowrap}
 .jr-radar-actions a:hover,.jr-radar-actions button:hover{background:var(--surface3)}
 .jr-intro{margin:-4px 0 14px;font-size:13.5px;color:var(--gris)}
@@ -9496,6 +9748,7 @@ async function pageRadar(env, url, message) {
         </div>
       </section>
 
+      ${radarIaBloc(p, true)}
       <section><h2>D\xE9tail du score</h2><div class="tw"><table>
         <thead><tr><th>Famille</th><th class="num">Points</th></tr></thead>
         <tbody>${Object.entries(detail2).map(([k, v]) => `<tr><td>${echapper(k)}</td><td class="num"><b>${v}</b></td></tr>`).join("") || `<tr><td colspan="2"><span class="sec">Pas encore calcul\xE9.</span></td></tr>`}</tbody>
@@ -9703,6 +9956,7 @@ async function pageRadar(env, url, message) {
           ${p.telephone ? `<a class="jr-c ok" href="https://wa.me/${echapper(tel)}" target="_blank" rel="noopener">${p.whatsapp ? "\u{1F4AC} WhatsApp" : "\u{1F4DE}"} ${echapper(p.telephone)}</a>` : `<span class="jr-c">\u{1F4DE} ${cherche}</span>`}
           ${p.instagram ? `<a class="jr-c ok" href="https://www.instagram.com/${echapper(p.instagram)}/" target="_blank" rel="noopener">\u{1F4F8} @${echapper(p.instagram)}</a>` : `<span class="jr-c">\u{1F4F8} ${cherche}</span>`}
         </div>
+        ${radarIaBloc(p, false)}
         ${p.email_envoye_le ? `<div class="meta">${radarSuiviBadges(p)}</div>` : ""}
         ${p.email_programme_le ? `<div class="jr-etat">\u23F3 Envoi programm\xE9, il part dans quelques minutes</div>` : ""}
         ${p.email_erreur && !p.email_envoye_le ? `<div class="jr-etat rouge">\u26A0\uFE0F Envoi \xE9chou\xE9 : ${echapper(String(p.email_erreur).slice(0, 120))}</div>` : ""}
@@ -9789,9 +10043,10 @@ async function pageRadar(env, url, message) {
         </span>
       </div>
       ${sourceDisponible ? `<div class="jr-recherche">
-        ${rechercheEnCours ? `<meta http-equiv="refresh" content="30">
+        ${rechercheEnCours ? `<meta http-equiv="refresh" content="120">
           <button type="button" disabled>Recherche en cours\u2026</button>
-          <span>${recherche.passes} passage(s) sur ${recherche.max} \xB7 ${Math.max(0, recherche.trouves - (recherche.depart || 0))} / ${reg.parJour} nouveaux prospects trouv\xE9s. La page se met \xE0 jour toute seule.</span>` : `<form method="POST" action="?cle=${cle}&page=radar&action=radar_recherche"
+          <form method="POST" action="?cle=${cle}&page=radar&action=radar_recherche_stop"><button type="submit" class="discret">Arr\xEAter</button></form>
+          <span>${recherche.passes} passage(s) \xB7 ${Math.max(0, recherche.trouves - (recherche.depart || 0))} / ${reg.parJour} nouveaux prospects trouv\xE9s. La recherche continue jusqu'\xE0 trouver vos prospects du jour (au plus ${RADAR_PASSES_PAR_JOUR} passages par jour). La page se met \xE0 jour toutes les 2 minutes.</span>` : `<form method="POST" action="?cle=${cle}&page=radar&action=radar_recherche"
             onsubmit="var b=this.querySelector('button');if(b.disabled)return false;b.disabled=true;b.textContent='Lancement\u2026';">
             <button type="submit">\u{1F50E} Donnez-moi les prospects du jour</button></form>
           <span>${recherche?.fin ? `Derni\xE8re recherche ${depuis(recherche.fin)} : ${Math.max(0, recherche.trouves - (recherche.depart || 0))} nouveau(x) prospect(s)${recherche.erreur ? ` \xB7 arr\xEAt\xE9e : ${echapper(recherche.erreur.replace(/[.\s]+$/, ""))}` : ""}.` : ""} ${modeAuto ? "Le radar cherche aussi tout seul toutes les 15 minutes." : "Le radar ne cherche que quand vous cliquez."}</span>`}
@@ -10577,6 +10832,11 @@ async function application(env, url, request) {
           await noterExecution(env.DB, "radar", Date.now() - debut, "erreur", String(e.message || e).slice(0, 500));
           return retour("&err=" + encodeURIComponent(String(e.message || e)));
         }
+      }
+      if (action === "radar_recherche_stop") {
+        const etat = radarEtatRecherche(await radarReglages(env.DB));
+        if (etat && !etat.fin) await radarEcrireRecherche(env.DB, { ...etat, fin: (/* @__PURE__ */ new Date()).toISOString(), verrou: null, erreur: "arr\xEAt\xE9e par vous" });
+        return retour("");
       }
       if (action === "radar_recherche") {
         const r = await radarDemarrerRecherche(env);
