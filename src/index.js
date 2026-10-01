@@ -6963,7 +6963,8 @@ async function pageDevis(env, url, message) {
     const aujourdhui = (/* @__PURE__ */ new Date()).toISOString().slice(0, 10);
     const acompte = d ? Number(d.acompte_pct) : 50;
     return `
-    <form class="f" method="POST" action="?cle=${cle}&page=devis${d ? `&numero=${d.numero}` : ""}&action=${action}">
+    <form class="f" method="POST" action="?cle=${cle}&page=devis${d ? `&numero=${d.numero}` : ""}&action=${action}"
+      onsubmit="if(this.dataset.envoi){return false;}this.dataset.envoi='1';var b=this.querySelector('button[type=submit]');b.disabled=true;b.textContent='${d ? "Enregistrement" : "Cr\xE9ation du devis"} en cours\u2026';">
       ${clients && clients.length ? `<label class="large">Client existant
         <select id="choixD" onchange="remplirD()">
           <option value="">— Nouveau client, \xE0 saisir ci-dessous —</option>
@@ -7007,6 +7008,7 @@ async function pageDevis(env, url, message) {
       <label class="large">Conditions particuli\xE8res <span style="font-weight:400">(facultatif)</span>
         <textarea name="conditions" style="min-height:80px" placeholder="2 allers-retours de modifications inclus. Les contenus (textes, photos) sont fournis par le client.">${val("conditions")}</textarea></label>
       <button class="envoyer large" type="submit">${d ? "Enregistrer les modifications" : "G\xE9n\xE9rer le devis"}</button>
+      <script>window.addEventListener("pageshow",function(){document.querySelectorAll("form[data-envoi]").forEach(function(f){delete f.dataset.envoi;var b=f.querySelector("button[type=submit]");b.disabled=false;b.textContent=${d ? '"Enregistrer les modifications"' : '"G\xE9n\xE9rer le devis"'};});});</script>
     </form>
     <script>
       function remplirD(){
