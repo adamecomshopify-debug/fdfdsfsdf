@@ -8021,7 +8021,7 @@ function radarDateMax(a, b) {
 }
 __name(radarDateMax, "radarDateMax");
 __name2(radarDateMax, "radarDateMax");
-async function radarRechercheMeta(env, mot, pays) {
+async function radarRechercheMeta(env, mot, pays, apres) {
   if (!env.META_TOKEN) throw new Error("Le jeton Meta Ad Library n'est pas encore configur\xE9.");
   const version = /^v\d+\.\d+$/.test(String(env.META_API_VERSION || "")) ? env.META_API_VERSION : "v26.0";
   const champs2 = [
@@ -8046,8 +8046,9 @@ async function radarRechercheMeta(env, mot, pays) {
       ad_active_status: "ACTIVE",
       ad_reached_countries: JSON.stringify([pays || "FR"]),
       fields: listeChamps.join(","),
-      limit: "50"
+      limit: "100"
     });
+    if (apres) params.set("after", apres);
     const reponse2 = await fetch(`https://graph.facebook.com/${version}/ads_archive?${params}`, {
       headers: { authorization: `Bearer ${env.META_TOKEN}` },
       signal: AbortSignal.timeout(25e3)
@@ -8066,7 +8067,9 @@ async function radarRechercheMeta(env, mot, pays) {
     }
     throw new Error(`Meta Ad Library${code} : ${donnees?.error?.message || `HTTP ${reponse.status}`}`);
   }
-  return Array.isArray(donnees.data) ? donnees.data : [];
+  const pubs = Array.isArray(donnees.data) ? donnees.data : [];
+  pubs.suivant = donnees?.paging?.next ? donnees?.paging?.cursors?.after || null : null;
+  return pubs;
 }
 __name(radarRechercheMeta, "radarRechercheMeta");
 __name2(radarRechercheMeta, "radarRechercheMeta");
@@ -8713,14 +8716,15 @@ CE QUE TU PEUX OBSERVER POUR CETTE BOUTIQUE
 Tu re\xE7ois le texte visible de la page d'accueil et d'une page produit, extrait du HTML, ainsi que des signaux d\xE9tect\xE9s automatiquement. Tu ne vois ni les images ni le rendu mobile ni le panier rempli : ne juge pas ce que tu ne peux pas observer (visuels, mobile, panier) et ne compte aucun probl\xE8me suppos\xE9. R\xE9dige tout en fran\xE7ais. Retourne uniquement le JSON demand\xE9 (decision, opportunity_score, ads_score, cro_gap_score, cro_maturity_score, business_fit_score, contact_score, shopify_confirmed, paid_ads_detected, main_cro_issues, positive_cro_signals, business_quality_signals, rejection_reason, outreach_angles, summary).
 
 ${contexte}`;
-  const modeles = [...new Set([env.GEMINI_QUALIF_MODEL, "gemini-3.7-flash", "gemini-2.5-flash", "gemini-2.5-flash-lite"].filter(Boolean))];
+  const essais = [env.GEMINI_QUALIF_MODEL, "gemini-3.7-flash", "gemini-3.5-flash", "gemini-3.7-flash", "gemini-3.5-flash-lite"].filter(Boolean);
   let payload = null, derniereErreur = "";
-  for (const modele of modeles) {
+  for (const [n, modele] of essais.entries()) {
+    if (n > 0) await new Promise((r) => setTimeout(r, 1500));
     const reponse = await fetch("https://generativelanguage.googleapis.com/v1beta/interactions", {
       method: "POST",
       headers: { "content-type": "application/json", "x-goog-api-key": env.GEMINI_API_KEY },
       body: JSON.stringify({ model: modele, input, response_format: { type: "text", mime_type: "application/json", schema } }),
-      signal: AbortSignal.timeout(9e4)
+      signal: AbortSignal.timeout(6e4)
     }).catch((e) => ({ ok: false, status: 0, json: async () => ({ message: String(e?.message || e) }) }));
     const corps = await reponse.json().catch(() => null);
     if (reponse.ok) {
@@ -8728,7 +8732,7 @@ ${contexte}`;
       break;
     }
     derniereErreur = erreurInteractionGemini(corps);
-    if (![0, 404, 429, 500, 503].includes(reponse.status) && !/demand|overload|unavailable|quota|not found/i.test(derniereErreur)) break;
+    if (![0, 404, 429, 500, 503].includes(reponse.status) && !/demand|overload|unavailable|quota|not found|no longer available/i.test(derniereErreur)) break;
   }
   if (!payload) throw new Error(`Analyse IA : ${derniereErreur}`);
   const texte = texteInteractionGemini(payload);
@@ -8996,7 +9000,9 @@ async function executerRadar(env, objectifJour) {
   let candidatsWeb = [];
   if (source === "meta") {
     try {
-      pubs = await radarRechercheMeta(env, motCle.mot, reg.pays);
+      const cleCurseur = `meta_curseur_${motCle.id}`;
+      pubs = await radarRechercheMeta(env, motCle.mot, reg.pays, reg.brut[cleCurseur] || null);
+      await db.prepare("INSERT OR REPLACE INTO radar_reglages (cle, valeur, maj_le) VALUES (?, ?, ?)").bind(cleCurseur, pubs.suivant || "", maintenant).run();
       if (!pubs.length) {
         source = env.GEMINI_API_KEY ? "google_gemini" : "web_brave";
         avertissements.push("Meta n'a renvoy\xE9 aucune annonce pour ce mot-cl\xE9.");
