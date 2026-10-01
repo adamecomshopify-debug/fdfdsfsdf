@@ -9172,6 +9172,7 @@ async function radarCompleterJour(db, reg, exigerIa = false) {
 __name(radarCompleterJour, "radarCompleterJour");
 __name2(radarCompleterJour, "radarCompleterJour");
 var RADAR_RECHERCHE_PASSES_MAX = 400;
+var RADAR_PASSES_PAR_JOUR = 150;
 function radarEtatRecherche(reg) {
   try {
     return reg?.brut?.recherche_manuelle ? JSON.parse(reg.brut.recherche_manuelle) : null;
@@ -9216,6 +9217,18 @@ async function radarRechercheEtape(env) {
     const objectif = (etat.depart || 0) + reg.parJour;
     etat.trouves = await radarProposesAujourdhui(db);
     if (etat.trouves >= objectif || etat.passes >= etat.max) return await terminer();
+    const jour = (/* @__PURE__ */ new Date()).toISOString().slice(0, 10);
+    let compteur = {};
+    try {
+      compteur = JSON.parse(reg.brut.recherche_jour || "{}");
+    } catch {
+    }
+    const passesJour = compteur.jour === jour ? Number(compteur.passes || 0) : 0;
+    if (passesJour >= RADAR_PASSES_PAR_JOUR) {
+      etat.erreur = `limite de ${RADAR_PASSES_PAR_JOUR} passages par jour atteinte (protection de l'app), relancez demain`;
+      return await terminer();
+    }
+    await db.prepare("INSERT OR REPLACE INTO radar_reglages (cle, valeur, maj_le) VALUES ('recherche_jour', ?, ?)").bind(JSON.stringify({ jour, passes: passesJour + 1 }), (/* @__PURE__ */ new Date()).toISOString()).run();
     etat.verrou = new Date(Date.now() + 4 * 6e4).toISOString();
     await radarEcrireRecherche(db, etat);
     const debut = Date.now();
@@ -10030,10 +10043,10 @@ async function pageRadar(env, url, message) {
         </span>
       </div>
       ${sourceDisponible ? `<div class="jr-recherche">
-        ${rechercheEnCours ? `<meta http-equiv="refresh" content="30">
+        ${rechercheEnCours ? `<meta http-equiv="refresh" content="120">
           <button type="button" disabled>Recherche en cours\u2026</button>
           <form method="POST" action="?cle=${cle}&page=radar&action=radar_recherche_stop"><button type="submit" class="discret">Arr\xEAter</button></form>
-          <span>${recherche.passes} passage(s) \xB7 ${Math.max(0, recherche.trouves - (recherche.depart || 0))} / ${reg.parJour} nouveaux prospects trouv\xE9s. La recherche continue jusqu'\xE0 trouver vos prospects du jour. La page se met \xE0 jour toute seule.</span>` : `<form method="POST" action="?cle=${cle}&page=radar&action=radar_recherche"
+          <span>${recherche.passes} passage(s) \xB7 ${Math.max(0, recherche.trouves - (recherche.depart || 0))} / ${reg.parJour} nouveaux prospects trouv\xE9s. La recherche continue jusqu'\xE0 trouver vos prospects du jour (au plus ${RADAR_PASSES_PAR_JOUR} passages par jour). La page se met \xE0 jour toutes les 2 minutes.</span>` : `<form method="POST" action="?cle=${cle}&page=radar&action=radar_recherche"
             onsubmit="var b=this.querySelector('button');if(b.disabled)return false;b.disabled=true;b.textContent='Lancement\u2026';">
             <button type="submit">\u{1F50E} Donnez-moi les prospects du jour</button></form>
           <span>${recherche?.fin ? `Derni\xE8re recherche ${depuis(recherche.fin)} : ${Math.max(0, recherche.trouves - (recherche.depart || 0))} nouveau(x) prospect(s)${recherche.erreur ? ` \xB7 arr\xEAt\xE9e : ${echapper(recherche.erreur.replace(/[.\s]+$/, ""))}` : ""}.` : ""} ${modeAuto ? "Le radar cherche aussi tout seul toutes les 15 minutes." : "Le radar ne cherche que quand vous cliquez."}</span>`}
