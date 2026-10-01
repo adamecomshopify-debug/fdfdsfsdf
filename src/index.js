@@ -9147,7 +9147,7 @@ __name(executerRadar, "executerRadar");
 __name2(executerRadar, "executerRadar");
 async function radarCompleterJour(db, reg, exigerIa = false) {
   const jour = (/* @__PURE__ */ new Date()).toISOString().slice(0, 10);
-  const deja = await db.prepare("SELECT COUNT(*) AS n FROM radar_prospects WHERE presente_le=? AND statut NOT IN ('non pertinent','d\xE9j\xE0 optimis\xE9')").bind(jour).first();
+  const deja = await db.prepare("SELECT COUNT(*) AS n FROM radar_prospects WHERE presente_le=? AND statut NOT IN ('non pertinent','d\xE9j\xE0 optimis\xE9','supprim\xE9')").bind(jour).first();
   const manque = reg.parJour - Number(deja?.n || 0);
   if (manque <= 0) return 0;
   const r = await db.prepare(`UPDATE radar_prospects SET presente_le=? WHERE id IN (
@@ -9185,7 +9185,7 @@ async function radarEcrireRecherche(db, etat) {
 }
 async function radarProposesAujourdhui(db) {
   const jour = (/* @__PURE__ */ new Date()).toISOString().slice(0, 10);
-  const r = await db.prepare("SELECT COUNT(*) AS n FROM radar_prospects WHERE presente_le=? AND statut NOT IN ('non pertinent','d\xE9j\xE0 optimis\xE9')").bind(jour).first();
+  const r = await db.prepare("SELECT COUNT(*) AS n FROM radar_prospects WHERE presente_le=? AND statut NOT IN ('non pertinent','d\xE9j\xE0 optimis\xE9','supprim\xE9')").bind(jour).first();
   return Number(r?.n || 0);
 }
 async function radarModeAuto(db) {
@@ -9547,6 +9547,7 @@ function radarVueContactes(liste, cle) {
     const action = (statut, lib) => p.statut === statut ? "" : `<form method="POST" action="?cle=${cle}&page=radar&prospect=${p.id}&action=radar_statut&statut=${encodeURIComponent(statut)}&onglet=contactes"><button type="submit">${lib}</button></form>`;
     return `<article class="ct-ligne" data-f="${filtres}" data-q="${echapper((nom + " " + (p.domaine || "") + " " + (p.email_contact || "")).toLowerCase())}">
       <div class="ct-id">
+        <input type="checkbox" class="ct-coche" name="ids" value="${p.id}" form="ct-suppr" aria-label="S\xE9lectionner ${echapper(nom)}">
         <span class="ct-av">${echapper(nom.trim().charAt(0).toUpperCase() || "?")}</span>
         <div class="ct-nom">
           <a href="?cle=${cle}&page=radar&prospect=${p.id}"><b>${echapper(nom)}</b></a>
@@ -9555,7 +9556,8 @@ function radarVueContactes(liste, cle) {
       </div>
       <div class="ct-suivi">${p.email_envoye_le ? etape(true, "Envoy\xE9", radarIlYa(p.email_envoye_le)) + etape(p.email_ouvertures > 0, "Ouvert", p.email_ouvertures > 0 ? `${p.email_ouvertures}\xD7 \xB7 ${radarIlYa(p.email_ouvert_le)}` : "") + etape(p.email_clics > 0, "Cliqu\xE9", p.email_clics > 0 ? `${p.email_clics}\xD7` : "") : `<span class="ct-vide">Contact\xE9 ${radarIlYa(p.change_le) || ""} \xB7 sans suivi d'email</span>`}</div>
       <div class="ct-statut"><span class="ct-pill ${st.ton}">${echapper(st.lib)}</span></div>
-      <div class="ct-actions">${action("r\xE9pondu", "A r\xE9pondu")}${action("rdv", "RDV")}${action("client", "Client")}</div>
+      <div class="ct-actions">${action("r\xE9pondu", "A r\xE9pondu")}${action("rdv", "RDV")}${action("client", "Client")}
+        <form method="POST" action="?cle=${cle}&page=radar&action=radar_supprimer" onsubmit="return confirm('Supprimer cette boutique de la liste ?')"><input type="hidden" name="ids" value="${p.id}"><button type="submit" class="ct-suppr">Supprimer</button></form></div>
     </article>`;
   };
   return `<style>
@@ -9601,6 +9603,11 @@ function radarVueContactes(liste, cle) {
 .ct-actions button{font:inherit;font-size:12px;padding:5px 10px;border-radius:7px;border:1px solid var(--trait-fort);background:var(--surface);color:var(--doux);cursor:pointer;white-space:nowrap}
 .ct-actions button:hover{background:var(--surface2);color:var(--encre)}
 .ct-rien{padding:36px 20px;text-align:center;color:var(--gris);font-size:14px}
+.ct-coche{width:16px;height:16px;flex-shrink:0;cursor:pointer}
+.ct-actions button.ct-suppr,.ct-groupe .ct-suppr{color:var(--rouge);border-color:var(--rouge)}
+.ct-groupe{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin:0 0 12px;padding:10px 14px;border:1px solid var(--trait-fort);border-radius:var(--r);background:var(--surface2);font-size:13px}
+.ct-groupe[hidden]{display:none}
+.ct-groupe button{font:inherit;font-size:12.5px;padding:6px 12px;border-radius:7px;border:1px solid var(--trait-fort);background:var(--surface);color:var(--doux);cursor:pointer}
 @media(max-width:1100px){.ct-ligne{grid-template-columns:1fr 1fr}.ct-actions{justify-content:flex-start}}
 @media(max-width:700px){.ct-kpi{grid-template-columns:1fr 1fr}.ct-ligne{grid-template-columns:1fr}.ct-chercher{margin-left:0;width:100%}}
 </style>
@@ -9622,6 +9629,11 @@ function radarVueContactes(liste, cle) {
     </div>
     <input class="ct-chercher" id="ct-chercher" type="search" placeholder="Rechercher une boutique…">
   </div>
+  <form id="ct-suppr" class="ct-groupe" method="POST" action="?cle=${cle}&page=radar&action=radar_supprimer" hidden
+    onsubmit="return confirm('Supprimer les boutiques s\xE9lectionn\xE9es de la liste ?')">
+    <span id="ct-nb"></span><button type="submit" class="ct-suppr">Supprimer la s\xE9lection</button>
+    <button type="button" id="ct-aucun">Tout d\xE9cocher</button>
+  </form>
   <div class="ct-liste" id="ct-liste">
     ${n ? liste.map(ligne).join("") : ""}
     <div class="ct-rien" id="ct-rien"${n ? ' hidden' : ""}>${n ? "Aucune boutique ne correspond." : "Aucune boutique contact\xE9e pour le moment."}</div>
@@ -9631,7 +9643,9 @@ function radarVueContactes(liste, cle) {
 (function(){var f="",q="",bs=document.querySelectorAll("#ct-filtres button"),ls=document.querySelectorAll(".ct-ligne"),r=document.getElementById("ct-rien");
 function maj(){var k=0;ls.forEach(function(l){var ok=(!f||(" "+l.dataset.f+" ").indexOf(" "+f+" ")>-1)&&(!q||l.dataset.q.indexOf(q)>-1);l.hidden=!ok;if(ok)k++});if(r&&ls.length)r.hidden=k>0}
 bs.forEach(function(b){b.onclick=function(){bs.forEach(function(x){x.classList.remove("on")});b.classList.add("on");f=b.dataset.f;maj()}});
-document.getElementById("ct-chercher").oninput=function(e){q=e.target.value.trim().toLowerCase();maj()};})();
+document.getElementById("ct-chercher").oninput=function(e){q=e.target.value.trim().toLowerCase();maj()};
+var g=document.getElementById("ct-suppr"),cs=document.querySelectorAll(".ct-coche");function sel(){var n=0;cs.forEach(function(c){if(c.checked)n++});g.hidden=!n;document.getElementById("ct-nb").textContent=n+" boutique(s) s\xE9lectionn\xE9e(s)"}
+cs.forEach(function(c){c.onchange=sel});document.getElementById("ct-aucun").onclick=function(){cs.forEach(function(c){c.checked=false});sel()};})();
 </script>`;
 }
 function radarSuiviBadges(p) {
@@ -9662,7 +9676,7 @@ async function pageRadar(env, url, message) {
     tous2(
       env.DB,
       `SELECT * FROM radar_prospects
-       WHERE statut NOT IN ('contact\xE9','r\xE9pondu','rdv','client','non pertinent','d\xE9j\xE0 optimis\xE9')
+       WHERE statut NOT IN ('contact\xE9','r\xE9pondu','rdv','client','non pertinent','d\xE9j\xE0 optimis\xE9','supprim\xE9')
          AND etape='analyse' AND presente_le=?
          AND (?=0 OR shopify_statut='oui')
        ORDER BY score DESC, id DESC LIMIT 50`,
@@ -10842,6 +10856,16 @@ async function application(env, url, request) {
         const r = await radarDemarrerRecherche(env);
         return retour(r.erreur ? "&err=" + encodeURIComponent(r.erreur) : "&rrecherche=1");
       }
+      if (action === "radar_supprimer") {
+        const ids = form.getAll("ids").map(Number).filter((n) => Number.isInteger(n) && n > 0).slice(0, 200);
+        if (!ids.length) return retour("&vue=contactes");
+        const maintenant = (/* @__PURE__ */ new Date()).toISOString();
+        const marques = ids.map(() => "?").join(",");
+        await env.DB.prepare(`INSERT INTO radar_historique (prospect_id, ancien_statut, nouveau_statut, motif, quand)
+          SELECT id, statut, 'supprim\xE9', 'supprim\xE9 depuis Contact\xE9s', ? FROM radar_prospects WHERE id IN (${marques})`).bind(maintenant, ...ids).run();
+        await env.DB.prepare(`UPDATE radar_prospects SET statut='supprim\xE9', email_programme_le=NULL WHERE id IN (${marques})`).bind(...ids).run();
+        return retour(`&vue=contactes&rsupp=${ids.length}`);
+      }
       if (action === "radar_statut") {
         const pid = Number(url.searchParams.get("prospect"));
         const st = url.searchParams.get("statut") || "nouveau";
@@ -10897,7 +10921,7 @@ async function application(env, url, request) {
         const maintenant = (/* @__PURE__ */ new Date()).toISOString();
         const r = await env.DB.prepare(`UPDATE radar_prospects SET email_programme_le=?, email_erreur=NULL
           WHERE id IN (${ids.map(() => "?").join(",")}) AND email_contact IS NOT NULL AND email_programme_le IS NULL
-          AND statut NOT IN ('contact\xE9','r\xE9pondu','rdv','client')`).bind(maintenant, ...ids).run();
+          AND statut NOT IN ('contact\xE9','r\xE9pondu','rdv','client','supprim\xE9')`).bind(maintenant, ...ids).run();
         await env.DB.prepare("INSERT OR REPLACE INTO radar_reglages (cle, valeur, maj_le) VALUES ('app_origine', ?, ?)").bind(url.origin, maintenant).run();
         return retour(`&vue=${encodeURIComponent(url.searchParams.get("vue") || "jour")}&rgroupe=${r.meta?.changes ?? ids.length}`);
       }
@@ -11256,6 +11280,7 @@ async function application(env, url, request) {
   if (url.searchParams.get("rmot") === "2") message = `<div class="reussite">Mot-cl\xE9 supprim\xE9.</div>`;
   if (url.searchParams.get("rreg")) message = `<div class="reussite">R\xE9glages enregistr\xE9s.</div>`;
   const rcollect = url.searchParams.get("rcollect");
+  if (url.searchParams.get("rsupp")) message = `<div class="reussite">${Number(url.searchParams.get("rsupp")) || 0} boutique(s) supprim\xE9e(s). Le Radar ne les reproposera pas.</div>`;
   if (rcollect) message = `<div class="reussite"><b>Collecte Prospect Radar termin\xE9e.</b> ${echapper(rcollect)}</div>`;
   if (url.searchParams.get("rrecherche")) message = `<div class="reussite"><b>Recherche lanc\xE9e.</b> Le radar cherche les prospects du jour, ils s'ajoutent ici au fur et \xE0 mesure (quelques minutes).</div>`;
   if (url.searchParams.get("tache")) message = `<div class="reussite">T\xE2che ajout\xE9e.</div>`;
