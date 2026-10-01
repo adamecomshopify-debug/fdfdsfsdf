@@ -9156,7 +9156,7 @@ async function radarCompleterJour(db, reg, exigerIa = false) {
 }
 __name(radarCompleterJour, "radarCompleterJour");
 __name2(radarCompleterJour, "radarCompleterJour");
-var RADAR_RECHERCHE_PASSES_MAX = 20;
+var RADAR_RECHERCHE_PASSES_MAX = 30;
 function radarEtatRecherche(reg) {
   try {
     return reg?.brut?.recherche_manuelle ? JSON.parse(reg.brut.recherche_manuelle) : null;
