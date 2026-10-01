@@ -8713,15 +8713,24 @@ CE QUE TU PEUX OBSERVER POUR CETTE BOUTIQUE
 Tu re\xE7ois le texte visible de la page d'accueil et d'une page produit, extrait du HTML, ainsi que des signaux d\xE9tect\xE9s automatiquement. Tu ne vois ni les images ni le rendu mobile ni le panier rempli : ne juge pas ce que tu ne peux pas observer (visuels, mobile, panier) et ne compte aucun probl\xE8me suppos\xE9. R\xE9dige tout en fran\xE7ais. Retourne uniquement le JSON demand\xE9 (decision, opportunity_score, ads_score, cro_gap_score, cro_maturity_score, business_fit_score, contact_score, shopify_confirmed, paid_ads_detected, main_cro_issues, positive_cro_signals, business_quality_signals, rejection_reason, outreach_angles, summary).
 
 ${contexte}`;
-  const modele = String(env.GEMINI_QUALIF_MODEL || "gemini-3.7-flash");
-  const reponse = await fetch("https://generativelanguage.googleapis.com/v1beta/interactions", {
-    method: "POST",
-    headers: { "content-type": "application/json", "x-goog-api-key": env.GEMINI_API_KEY },
-    body: JSON.stringify({ model: modele, input, response_format: { type: "text", mime_type: "application/json", schema } }),
-    signal: AbortSignal.timeout(9e4)
-  });
-  const payload = await reponse.json().catch(() => null);
-  if (!reponse.ok) throw new Error(`Analyse IA : ${erreurInteractionGemini(payload)}`);
+  const modeles = [...new Set([env.GEMINI_QUALIF_MODEL, "gemini-3.7-flash", "gemini-2.5-flash", "gemini-2.5-flash-lite"].filter(Boolean))];
+  let payload = null, derniereErreur = "";
+  for (const modele of modeles) {
+    const reponse = await fetch("https://generativelanguage.googleapis.com/v1beta/interactions", {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-goog-api-key": env.GEMINI_API_KEY },
+      body: JSON.stringify({ model: modele, input, response_format: { type: "text", mime_type: "application/json", schema } }),
+      signal: AbortSignal.timeout(9e4)
+    }).catch((e) => ({ ok: false, status: 0, json: async () => ({ message: String(e?.message || e) }) }));
+    const corps = await reponse.json().catch(() => null);
+    if (reponse.ok) {
+      payload = corps;
+      break;
+    }
+    derniereErreur = erreurInteractionGemini(corps);
+    if (![0, 404, 429, 500, 503].includes(reponse.status) && !/demand|overload|unavailable|quota|not found/i.test(derniereErreur)) break;
+  }
+  if (!payload) throw new Error(`Analyse IA : ${derniereErreur}`);
   const texte = texteInteractionGemini(payload);
   try {
     return JSON.parse(texte);
@@ -9101,7 +9110,7 @@ async function executerRadar(env, objectifJour) {
     const marques = lot.map(() => "?").join(",");
     const connus = await tous2(db, `SELECT page_id, domaine FROM radar_prospects
       WHERE (domaine IN (${marques}) OR page_id IN (${marques}))
-        AND (presente_le IS NOT NULL OR ia_decision IS NOT NULL OR statut<>'nouveau' OR julianday('now')-julianday(cree_le)>30)`, ...lot.map((a) => a.domaine), ...lot.map((a) => a.pageId));
+        AND (presente_le IS NOT NULL OR ia_decision IN ('HOT_PROSPECT','MANUAL_REVIEW','REJECT') OR statut<>'nouveau' OR julianday('now')-julianday(cree_le)>30)`, ...lot.map((a) => a.domaine), ...lot.map((a) => a.pageId));
     for (const c of connus) deja.add(c.domaine).add(c.page_id);
   }
   const candidats = avecDomaine.filter((a) => !deja.has(a.domaine) && !deja.has(a.pageId)).sort((a, b) => b.pubsActives - a.pubsActives).slice(0, limite);
