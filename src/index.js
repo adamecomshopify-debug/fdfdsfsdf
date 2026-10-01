@@ -8820,7 +8820,7 @@ async function radarAnalyserAnnonceur(env, annonceur, reg) {
     if (annonceur.pertinenceIndex) pertinence.confiance = Math.max(60, pertinence.confiance);
     const [rdap, pagespeed] = await Promise.all([
       radarLireRdap(annonceur.domaine),
-      reg.brut.pagespeed_actif === "0" ? null : radarLirePageSpeed(env, annonceur.domaine)
+      reg.brut.pagespeed_actif === "0" || !env.PAGESPEED_API_KEY ? null : radarLirePageSpeed(env, annonceur.domaine)
     ]);
     const temporaire = {
       source: annonceur.source || "meta",
@@ -8849,7 +8849,8 @@ async function radarAnalyserAnnonceur(env, annonceur, reg) {
     const qualite = radarEvaluerQualite(site.html, annonceur.pubsActives, temporaire.nombre_avis, reg.pays);
     let qualifie = !qualite.exclusion && resultatScore.score >= reg.scoreMin && activiteValide && marcheValide && nicheValide && (!reg.shopifyObligatoire || shopify2.statut === "oui");
     let ia = null;
-    if (env.GEMINI_API_KEY && !qualite.exclusion && activiteValide && marcheValide && nicheValide && shopify2.statut === "oui") {
+    const activiteIa = sourceWeb || annonceur.pubsActives >= reg.pubsMin;
+    if (env.GEMINI_API_KEY && !qualite.exclusion && activiteIa && marcheValide && nicheValide && shopify2.statut === "oui") {
       try {
         const produit = await radarChargerPageProduit(annonceur.domaine, site.html);
         const contactsAccueil = radarExtraireContacts(site.html, annonceur.domaine);
@@ -9075,7 +9076,8 @@ async function executerRadar(env, objectifJour) {
          premiere_pub_vue=CASE WHEN radar_annonceurs.premiere_pub_vue IS NULL OR excluded.premiere_pub_vue < radar_annonceurs.premiere_pub_vue THEN excluded.premiere_pub_vue ELSE radar_annonceurs.premiere_pub_vue END,
          derniere_pub_vue=CASE WHEN radar_annonceurs.derniere_pub_vue IS NULL OR excluded.derniere_pub_vue > radar_annonceurs.derniere_pub_vue THEN excluded.derniere_pub_vue ELSE radar_annonceurs.derniere_pub_vue END,
          pubs_actives=excluded.pubs_actives,portee_ue=MAX(COALESCE(radar_annonceurs.portee_ue,0),COALESCE(excluded.portee_ue,0)),
-         niche=COALESCE(radar_annonceurs.niche,excluded.niche),maj_le=excluded.maj_le`).bind(
+         niche=COALESCE(radar_annonceurs.niche,excluded.niche),maj_le=excluded.maj_le
+        RETURNING premiere_pub_vue`).bind(
         annonceur.pageId,
         annonceur.nom,
         annonceur.premierePub,
@@ -9086,11 +9088,23 @@ async function executerRadar(env, objectifJour) {
         annonceur.niche,
         maintenant,
         maintenant
-      ).run();
+      ).first().then((h) => {
+        if (h?.premiere_pub_vue) annonceur.premierePub = radarDateMin(annonceur.premierePub, h.premiere_pub_vue);
+      });
     }
   }
   const limite = Math.max(1, Math.min(env.GEMINI_API_KEY ? 3 : 10, Number(reg.brut.candidats_par_passage || 5)));
-  const candidats = [...groupes.values()].filter((a) => a.domaine).sort((a, b) => b.pubsActives - a.pubsActives).slice(0, limite);
+  const avecDomaine = [...groupes.values()].filter((a) => a.domaine);
+  const deja = /* @__PURE__ */ new Set();
+  for (let i = 0; i < avecDomaine.length; i += 40) {
+    const lot = avecDomaine.slice(i, i + 40);
+    const marques = lot.map(() => "?").join(",");
+    const connus = await tous2(db, `SELECT page_id, domaine FROM radar_prospects
+      WHERE (domaine IN (${marques}) OR page_id IN (${marques}))
+        AND (presente_le IS NOT NULL OR ia_decision IS NOT NULL OR statut<>'nouveau' OR julianday('now')-julianday(cree_le)>30)`, ...lot.map((a) => a.domaine), ...lot.map((a) => a.pageId));
+    for (const c of connus) deja.add(c.domaine).add(c.page_id);
+  }
+  const candidats = avecDomaine.filter((a) => !deja.has(a.domaine) && !deja.has(a.pageId)).sort((a, b) => b.pubsActives - a.pubsActives).slice(0, limite);
   let analyses = 0;
   let qualifies = 0;
   let iaRejets = 0;
@@ -9142,7 +9156,7 @@ async function radarCompleterJour(db, reg, exigerIa = false) {
 }
 __name(radarCompleterJour, "radarCompleterJour");
 __name2(radarCompleterJour, "radarCompleterJour");
-var RADAR_RECHERCHE_PASSES_MAX = 12;
+var RADAR_RECHERCHE_PASSES_MAX = 20;
 function radarEtatRecherche(reg) {
   try {
     return reg?.brut?.recherche_manuelle ? JSON.parse(reg.brut.recherche_manuelle) : null;
