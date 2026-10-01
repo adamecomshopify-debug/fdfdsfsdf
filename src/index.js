@@ -8333,6 +8333,9 @@ async function radarRechercheCommonCrawl(env, mot, niche, pays, identifiantMot) 
 }
 __name(radarRechercheCommonCrawl, "radarRechercheCommonCrawl");
 __name2(radarRechercheCommonCrawl, "radarRechercheCommonCrawl");
+// Les textes d'annonces Meta peuvent d\xE9passer 60 000 caract\xE8res : on n'en garde que le d\xE9but,
+// sinon la base D1 (500 Mo sur le plan gratuit) se remplit et plus rien ne peut s'y \xE9crire.
+var radarCourt = /* @__PURE__ */ __name2((t, n) => t ? String(t).slice(0, n) : null, "radarCourt");
 async function radarEnregistrerPub(db, pub, motCle, maintenant) {
   const adId = String(pub?.id || "").trim();
   const pageId = String(pub?.page_id || "").trim();
@@ -8349,10 +8352,10 @@ async function radarEnregistrerPub(db, pub, motCle, maintenant) {
     pageId,
     pub.ad_delivery_start_time || pub.ad_creation_time || null,
     pub.ad_delivery_stop_time || null,
-    radarPremierTexte(pub.ad_creative_bodies),
-    radarPremierTexte(pub.ad_creative_link_titles),
-    radarPremierTexte(pub.ad_creative_link_captions),
-    radarPremierTexte(pub.ad_creative_link_descriptions),
+    radarCourt(radarPremierTexte(pub.ad_creative_bodies), 500),
+    radarCourt(radarPremierTexte(pub.ad_creative_link_titles), 200),
+    radarCourt(radarPremierTexte(pub.ad_creative_link_captions), 200),
+    radarCourt(radarPremierTexte(pub.ad_creative_link_descriptions), 200),
     pub.ad_snapshot_url || null,
     [].concat(pub.publisher_platforms || []).join(","),
     Number(pub.eu_total_reach || 0) || null,
