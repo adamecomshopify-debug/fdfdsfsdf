@@ -9625,6 +9625,37 @@ async function smtpTestEnAttente(env) {
 }
 __name(smtpTestEnAttente, "smtpTestEnAttente");
 __name2(smtpTestEnAttente, "smtpTestEnAttente");
+// Test Amazon SES : radar_reglages cle='ses_test' = adresse. Envoie le dernier article du blog,
+// résultat dans emails_envoyes (modèle « blog_newsletter_test »).
+async function sesTestEnAttente(env) {
+  if (!sesActif(env)) return;
+  try {
+    const demande = await env.DB.prepare("SELECT valeur FROM radar_reglages WHERE cle='ses_test'").first();
+    if (!demande?.valeur) return;
+    await env.DB.prepare("DELETE FROM radar_reglages WHERE cle='ses_test'").run();
+    const dernier = await env.DB.prepare("SELECT titre, lien FROM newsletter_envois ORDER BY cree_le DESC LIMIT 1").first().catch(() => null);
+    const article = { titre: dernier?.titre || "Test de la newsletter AdamEcom", lien: dernier?.lien || "https://adam-ecom.com", extrait: "Ceci est un email de test envoy\xE9 par Amazon SES depuis votre application.", image: null, date: null };
+    const lien = await lienDesabo(env, demande.valeur);
+    let statut = "envoy\xE9", message = null;
+    try {
+      message = "Amazon SES " + await envoyerSes(env, {
+        de: env.SENDER_EMAIL,
+        deNom: env.SENDER_NAME || "AdamEcom",
+        a: demande.valeur,
+        objet: "[TEST] " + article.titre,
+        html: construireEmail(env, article).replace("{{ unsubscribe }}", echapper(lien)),
+        entetes: [{ Name: "List-Unsubscribe", Value: `<${lien}>` }, { Name: "List-Unsubscribe-Post", Value: "List-Unsubscribe=One-Click" }]
+      });
+    } catch (e) {
+      statut = "\xE9chec";
+      message = String(e?.message || e);
+    }
+    await noterEnvoi(env, "blog_newsletter_test", demande.valeur, "[TEST] " + article.titre, statut, message);
+  } catch (e) {
+    console.error("ses test", e?.message || e);
+  }
+}
+__name(sesTestEnAttente, "sesTestEnAttente");
 function radarHtmlEmail(texte, suivi) {
   if (!suivi) return `<div style="font-family:Arial,sans-serif;font-size:14px;line-height:1.5">${echapper(texte).replace(/\n/g, "<br>")}</div>`;
   const base = `${suivi.origine}/r/${suivi.jeton}`;
@@ -11560,7 +11591,7 @@ var index_default = {
         radarModeAuto(env.DB).then((auto) => auto ? lancer("radar", executerRadar, env) : null)
       ]));
     } else {
-      ctx.waitUntil(Promise.all([lancer("calendly", executer, env), smtpTestEnAttente(env), radarEnvoisProgrammes(env), radarContactsEnAttente(env), radarQualiteEnAttente(env), radarRechercheEtape(env), newsletterSesEtape(env)]));
+      ctx.waitUntil(Promise.all([lancer("calendly", executer, env), smtpTestEnAttente(env), radarEnvoisProgrammes(env), radarContactsEnAttente(env), radarQualiteEnAttente(env), radarRechercheEtape(env), newsletterSesEtape(env), sesTestEnAttente(env)]));
     }
   },
   // Déclenchement manuel, pratique pour tester sans attendre la planification.
