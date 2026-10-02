@@ -4534,7 +4534,7 @@ var PAGES = [
     id: "newsletter",
     nom: "Newsletter du blog",
     groupe: "Activit\xE9",
-    sous: "Chaque article part en campagne. Qui l'a ouvert, qui a cliqu\xE9."
+    sous: "Vos articles envoy\xE9s \xE0 vos clients, ceux qui attendent et leurs r\xE9sultats."
   },
   {
     id: "reglages",
@@ -6949,101 +6949,111 @@ async function pageNewsletter(env, url, message) {
   const ouvreurs = suivies.reduce((t, s) => t + s.ouvreurs, 0);
   const cliqueurs = suivies.reduce((t, s) => t + s.cliqueurs, 0);
   const desabos = suivies.reduce((t, s) => t + s.desabonnements, 0);
-  const ligne = /* @__PURE__ */ __name22((c) => {
-    const st = stats.get(String(c.id));
-    return `<tr>
-      <td><b>${echapper(c.titre || "\u2014")}</b>
-        ${c.lien ? `<br><a class="sec" href="${echapper(c.lien)}" target="_blank" rel="noopener">voir l'article \u2192</a>` : ""}</td>
-      <td class="num">${st ? st.livres : c.destinataires ?? "?"}</td>
-      <td class="num">${st ? `<b>${st.ouvreurs}</b><br><span class="sec">${pourcent(st.tauxOuverture)}</span>` : "\u2014"}</td>
-      <td class="num">${st ? `<b>${st.cliqueurs}</b><br><span class="sec">${pourcent(st.tauxClic)}</span>` : "\u2014"}</td>
-      <td class="num">${st ? st.desabonnements : "\u2014"}</td>
-      <td class="nowrap">${dateFr2(c.envoyee_le)}</td>
-      <td class="nowrap"><a class="bouton pale" href="?cle=${cle}&page=newsletter&campagne=${encodeURIComponent(c.id)}">D\xE9tail</a></td>
-    </tr>`;
-  }, "ligne");
+  const sesOk = sesActif(env);
+  const lienArticle = (t, l) => l ? `<a class="nl-titre" href="${echapper(l)}" target="_blank" rel="noopener">${echapper(t || "—")}</a>` : `<span class="nl-titre">${echapper(t || "—")}</span>`;
+  const barre = (v, couleur) => `<span class="nl-barre"><span style="width:${Math.max(2, Math.min(100, Math.round((v || 0) * 100)))}%;background:${couleur}"></span></span>`;
+  const bouton = (action, guid, libelle, classe, confirmer) => `<form method="POST" action="?cle=${cle}&page=newsletter&action=${action}"${confirmer ? ` onsubmit="return confirm('${confirmer}')"` : ""}>
+      <input type="hidden" name="guid" value="${echapper(guid)}"><button type="submit" class="${classe}">${libelle}</button></form>`;
+  const etatAuto = !exec || !ok ? ["rouge", "Surveillance du blog en erreur", exec?.message ? echapper(exec.message).slice(0, 160) : "Aucune v\xE9rification pour l'instant."] : muet ? ["orange", "Surveillance du blog silencieuse", `Derni\xE8re v\xE9rification ${depuis(exec.quand)}.`] : autoActif ? ["vert", "Envoi automatique activ\xE9", `Chaque nouvel article part le jour m\xEAme${sesOk ? " par Amazon SES, 15 contacts par minute" : ""}. Derni\xE8re v\xE9rification ${depuis(exec.quand)}.`] : ["gris", "Envoi automatique en pause", `Rien ne part sans votre accord. Derni\xE8re v\xE9rification du blog ${depuis(exec.quand)}.`];
+  const carteStat = (k, v, s, barreHtml = "") => `<div class="nl-stat"><div class="nl-k">${k}</div><div class="nl-v">${v}</div>${barreHtml}<div class="nl-s">${s}</div></div>`;
   return `
+  <style>
+    .nl{--nl-encre:#2B2A27;--nl-doux:#6F6B63;--nl-trait:#E7E2D8;--nl-fond:#FFFFFF;--nl-creme:#FAF8F3;font-size:15px;line-height:1.6;color:var(--nl-encre);max-width:1040px}
+    .nl h2.nl-h{font:600 18px/1.3 Helvetica,Arial,sans-serif;letter-spacing:-.01em;text-transform:none;color:var(--nl-encre);margin:36px 0 6px;display:flex;align-items:center;gap:10px}
+    .nl h2.nl-h::after{display:none}
+    .nl .nl-sous{color:var(--nl-doux);margin:0 0 14px}
+    .nl .nl-pastille{font:600 12px/1 Helvetica,Arial,sans-serif;background:#FFF1C2;color:#7A5B00;border-radius:999px;padding:5px 10px}
+    .nl .nl-etat{display:flex;gap:14px;align-items:flex-start;background:var(--nl-fond);border:1px solid var(--nl-trait);border-radius:14px;padding:18px 20px;margin-top:8px}
+    .nl .nl-point{width:12px;height:12px;border-radius:50%;margin-top:6px;flex:none}
+    .nl .nl-point.vert{background:#3F8F5A}.nl .nl-point.gris{background:#A8A398}.nl .nl-point.orange{background:#D08A1E}.nl .nl-point.rouge{background:#C2453A}
+    .nl .nl-etat b{font-size:16px}.nl .nl-etat p{margin:2px 0 0;color:var(--nl-doux)}
+    .nl .nl-etat a{margin-left:auto;white-space:nowrap;align-self:center}
+    .nl .nl-liste{background:var(--nl-fond);border:1px solid var(--nl-trait);border-radius:14px;overflow:hidden}
+    .nl .nl-ligne{display:flex;gap:16px;align-items:center;padding:16px 20px;border-top:1px solid var(--nl-trait)}
+    .nl .nl-ligne:first-child{border-top:0}
+    .nl .nl-corps{flex:1;min-width:0}
+    .nl .nl-titre{font-weight:600;color:var(--nl-encre);text-decoration:none;font-size:15.5px}
+    .nl a.nl-titre:hover{text-decoration:underline}
+    .nl .nl-meta{color:var(--nl-doux);font-size:13.5px;margin-top:3px}
+    .nl .nl-actions{display:flex;gap:8px;flex:none}
+    .nl .nl-actions form{margin:0}
+    .nl button.nl-oui,.nl button.nl-non,.nl a.nl-lien{font:600 14px/1 Helvetica,Arial,sans-serif;border-radius:8px;padding:11px 16px;cursor:pointer;border:1px solid transparent}
+    .nl button.nl-oui{background:#2F6F4A;color:#fff}.nl button.nl-oui:hover{background:#275D3E}
+    .nl button.nl-non{background:transparent;color:var(--nl-doux);border-color:var(--nl-trait)}.nl button.nl-non:hover{background:var(--nl-creme);color:var(--nl-encre)}
+    .nl a.nl-lien{color:var(--nl-encre);border-color:var(--nl-trait);text-decoration:none;background:var(--nl-fond);display:inline-block}
+    .nl a.nl-lien:hover{background:var(--nl-creme)}
+    .nl .nl-pied{display:flex;justify-content:flex-end;margin-top:10px}
+    .nl .nl-stats{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}
+    .nl .nl-stat{background:var(--nl-fond);border:1px solid var(--nl-trait);border-radius:14px;padding:16px 18px}
+    .nl .nl-k{color:var(--nl-doux);font-size:14px}.nl .nl-v{font:700 28px/1.2 Helvetica,Arial,sans-serif;margin:4px 0}
+    .nl .nl-s{color:var(--nl-doux);font-size:13.5px}
+    .nl .nl-barre{display:block;height:6px;border-radius:3px;background:#EFEBE2;overflow:hidden;margin:6px 0}
+    .nl .nl-barre>span{display:block;height:100%;border-radius:3px}
+    .nl .nl-chiffres{display:flex;gap:22px;flex:none;text-align:right}
+    .nl .nl-chiffres div{min-width:74px}.nl .nl-chiffres b{display:block;font-size:16px}.nl .nl-chiffres span{color:var(--nl-doux);font-size:12.5px}
+    .nl .nl-progres{width:180px;flex:none}
+    .nl .nl-erreur{color:#A33A30;font-size:13.5px;margin-top:4px}
+    .nl details.nl-aide{margin-top:36px;background:var(--nl-creme);border:1px solid var(--nl-trait);border-radius:14px;padding:14px 20px;color:var(--nl-doux)}
+    .nl details.nl-aide summary{cursor:pointer;font-weight:600;color:var(--nl-encre)}
+    .nl details.nl-aide p{margin:10px 0 0}
+    @media (max-width:820px){.nl .nl-stats{grid-template-columns:repeat(2,minmax(0,1fr))}.nl .nl-ligne,.nl .nl-etat{flex-wrap:wrap}.nl .nl-corps{flex-basis:100%}.nl .nl-etat>div{flex:1 1 200px}.nl .nl-etat a{margin-left:0}.nl .nl-chiffres{text-align:left}.nl .nl-progres{width:100%}}
+    .nl details.nl-aide summary{background:none;border:0;padding:0;box-shadow:none}
+  </style>
+  <div class="nl">
   ${message || ""}
-  ${erreurStats ? `<div class="alerte">Les statistiques d'ouverture n'ont pas pu \xEAtre lues.<br>
-    <span class="sec">${echapper(erreurStats)}</span></div>` : ""}
+  ${erreurStats ? `<div class="alerte">Les statistiques d'ouverture n'ont pas pu \xEAtre lues.<br><span class="sec">${echapper(erreurStats)}</span></div>` : ""}
 
-  <section><h2>Audience</h2><div class="grille">
-    ${carteHtml("Emails livr\xE9s", String(livres), `sur ${suivies.length} campagne(s)`)}
-    ${carteHtml(
-    "Ont ouvert",
-    String(ouvreurs),
-    livres ? pourcent(ouvreurs / livres) + " des emails livr\xE9s" : "",
-    ouvreurs ? "bon" : "neutre"
-  )}
-    ${carteHtml(
-    "Ont cliqu\xE9",
-    String(cliqueurs),
-    livres ? pourcent(cliqueurs / livres) + " des emails livr\xE9s" : "",
-    cliqueurs ? "bon" : "neutre"
-  )}
-    ${carteHtml("D\xE9sabonnements", String(desabos), "sur la p\xE9riode", desabos ? "moyen" : "neutre")}
-  </div></section>
+  <div class="nl-etat"><span class="nl-point ${etatAuto[0]}"></span>
+    <div><b>${etatAuto[1]}</b><p>${etatAuto[2]}</p></div>
+    <a class="nl-lien" href="?cle=${cle}&page=emails">${autoActif ? "Mettre en pause" : "Activer"}</a></div>
 
-  <section><h2>L'automatisation</h2><div class="grille">
-    <div class="carte ${!exec || !ok ? "mauvais" : muet ? "moyen" : "bon"}">
-      <div class="k">Surveillance du blog</div>
-      <div class="v txt">${!exec ? "aucune ex\xE9cution" : !ok ? "en erreur" : muet ? "silencieuse" : "op\xE9rationnelle"}</div>
-      <div class="s">${exec ? `${depuis(exec.quand)} \xB7 ${exec.duree_ms ?? "?"} ms` : "\u2014"}</div>
-      ${exec?.message ? `<div class="err">${echapper(exec.message).slice(0, 150)}</div>` : ""}</div>
-    ${carteHtml("V\xE9rifications", String(nbExec[0]?.n ?? 0), "toutes les 15 minutes")}
-    ${carteHtml("Articles envoy\xE9s", String(camps.length), "")}
-  </div></section>
+  ${enAttente.length ? `<h2 class="nl-h">\xC0 envoyer <span class="nl-pastille">${enAttente.length}</span></h2>
+  <p class="nl-sous">${autoActif ? "Ces articles ne sont pas partis le jour de leur publication : ils attendent votre d\xE9cision." : "Envoi automatique en pause : ces articles attendent votre d\xE9cision."}</p>
+  <div class="nl-liste">${enAttente.map((e) => `<div class="nl-ligne">
+      <div class="nl-corps">${lienArticle(e.titre, e.lien)}<div class="nl-meta">D\xE9tect\xE9 le ${dateFr2(e.cree_le, false)}</div></div>
+      <div class="nl-actions">${bouton("nl_envoyer", e.guid, "Envoyer", "nl-oui", "Envoyer cet article \\xE0 toute votre liste ?")}${bouton("nl_ignorer", e.guid, "Ne pas envoyer", "nl-non")}</div>
+    </div>`).join("")}</div>
+  ${enAttente.length > 1 ? `<div class="nl-pied"><form method="POST" action="?cle=${cle}&page=newsletter&action=nl_ignorer" onsubmit="return confirm('Retirer les ${enAttente.length} articles de la file ?')">
+    ${enAttente.map((e) => `<input type="hidden" name="guid" value="${echapper(e.guid)}">`).join("")}<button type="submit" class="nl-non">Ne rien envoyer de cette liste</button></form></div>` : ""}` : ""}
 
-  <div class="note"><b>Comment \xE7a marche.</b> Toutes les 15 minutes, l'application lit le flux de votre
-    blog. D\xE8s qu'un article y appara\xEEt, ${sesActif(env) ? `il part par Amazon SES vers chaque contact de votre liste Brevo (${SES_PAR_MINUTE} par minute), avec un lien de d\xE9sinscription.` : "il part en campagne Brevo vers votre liste."}<br>
-    <span class="sec">Flux : <a href="${echapper(env.FEED_URL || "")}" target="_blank" rel="noopener">${echapper(env.FEED_URL || "non configur\xE9")}</a>
-    \xB7 liste ${echapper(env.BREVO_LIST || "\u2014")} \xB7 exp\xE9diteur ${echapper(env.SENDER_EMAIL || "\u2014")}</span></div>
+  ${envoisSes.length ? `<h2 class="nl-h">Envois par Amazon SES</h2>
+  <div class="nl-liste">${envoisSes.map((e) => {
+    const total = e.destinataires || 0, fait = e.ses_envoyes || 0;
+    return `<div class="nl-ligne">
+      <div class="nl-corps">${lienArticle(e.titre, e.lien)}<div class="nl-meta">${e.statut === "envoyee" ? `Termin\xE9 le ${dateFr2(e.envoyee_le || e.maj_le)}` : "En cours d'envoi"}${e.ses_erreurs ? ` \xB7 ${e.ses_erreurs} adresse(s) en erreur` : ""}</div>
+        ${e.erreur ? `<div class="nl-erreur">${echapper(e.erreur).slice(0, 200)}</div>` : ""}</div>
+      <div class="nl-progres">${barre(total ? fait / total : 0, e.statut === "envoyee" ? "#3F8F5A" : "#D9A520")}<div class="nl-meta">${fait} / ${total || "?"} envoy\xE9s</div></div>
+    </div>`;
+  }).join("")}</div>` : ""}
 
-  ${enAttente.length ? `<section><h2>\xC0 envoyer</h2>
-    <div class="note">${autoActif ? "Ces articles ne sont pas partis le jour o\xF9 ils ont \xE9t\xE9 publi\xE9s : ils ne partiront plus tout seuls." : "L'envoi automatique est en pause : rien ne part sans votre accord."}
-      Choisissez pour chacun : <b>Envoyer maintenant</b> l'envoie \xE0 toute votre liste${sesActif(env) ? " par Amazon SES" : ""}, <b>Ne pas envoyer</b> le retire de la file.</div>
-    ${tableauHtml(
-    [{ nom: "Article" }, { nom: "D\xE9tect\xE9", classe: "nowrap" }, { nom: "" }],
-    enAttente.map((e) => `<tr><td><b>${echapper(e.titre || "\u2014")}</b>${e.lien ? `<br><a class="sec" href="${echapper(e.lien)}" target="_blank" rel="noopener">voir l'article \u2192</a>` : ""}</td>
-      <td class="nowrap">${dateFr2(e.cree_le)}</td>
-      <td class="nowrap"><form method="POST" action="?cle=${cle}&page=newsletter&action=nl_envoyer" style="display:inline" onsubmit="return confirm('Envoyer cet article \xE0 toute votre liste ?')">
-        <input type="hidden" name="guid" value="${echapper(e.guid)}"><button type="submit" class="bouton">Envoyer maintenant</button></form>
-        <form method="POST" action="?cle=${cle}&page=newsletter&action=nl_ignorer" style="display:inline">
-        <input type="hidden" name="guid" value="${echapper(e.guid)}"><button type="submit" class="bouton pale">Ne pas envoyer</button></form></td></tr>`),
-    "",
-    "tab-attente"
-  )}${enAttente.length > 1 ? `<form method="POST" action="?cle=${cle}&page=newsletter&action=nl_ignorer" style="margin-top:8px" onsubmit="return confirm('Retirer les ${enAttente.length} articles de la file ?')">
-    ${enAttente.map((e) => `<input type="hidden" name="guid" value="${echapper(e.guid)}">`).join("")}<button type="submit" class="bouton pale">Ne rien envoyer de cette liste</button></form>` : ""}</section>` : ""}
+  <h2 class="nl-h">R\xE9sultats</h2>
+  <p class="nl-sous">Sur ${suivies.length} article(s) envoy\xE9(s) par Brevo.</p>
+  <div class="nl-stats">
+    ${carteStat("Emails livr\xE9s", String(livres), "au total")}
+    ${carteStat("Ont ouvert", String(ouvreurs), livres ? pourcent(ouvreurs / livres) + " des lecteurs" : "—", barre(livres ? ouvreurs / livres : 0, "#6E9BC7"))}
+    ${carteStat("Ont cliqu\xE9", String(cliqueurs), livres ? pourcent(cliqueurs / livres) + " des lecteurs" : "—", barre(livres ? cliqueurs / livres : 0, "#3F8F5A"))}
+    ${carteStat("D\xE9sabonnements", String(desabos), "sur la p\xE9riode")}
+  </div>
 
-  ${envoisSes.length ? `<section><h2>Envois Amazon SES</h2>${tableauHtml(
-    [{ nom: "Article" }, { nom: "Envoy\xE9s", classe: "num" }, { nom: "Erreurs", classe: "num" }, { nom: "\xC9tat" }, { nom: "Mis \xE0 jour", classe: "nowrap" }],
-    envoisSes.map((e) => `<tr><td><b>${echapper(e.titre || "\u2014")}</b>${e.lien ? `<br><a class="sec" href="${echapper(e.lien)}" target="_blank" rel="noopener">voir l'article \u2192</a>` : ""}</td>
-      <td class="num">${e.ses_envoyes ?? 0} / ${e.destinataires ?? "?"}</td>
-      <td class="num">${e.ses_erreurs ?? 0}</td>
-      <td>${e.statut === "envoyee" ? "termin\xE9" : "en cours"}${e.erreur ? `<div class="err">${echapper(e.erreur).slice(0, 200)}</div>` : ""}</td>
-      <td class="nowrap">${dateFr2(e.envoyee_le || e.maj_le)}</td></tr>`),
-    "",
-    "tab-ses"
-  )}</section>` : ""}
+  <h2 class="nl-h">Articles envoy\xE9s</h2>
+  ${camps.length ? `<div class="nl-liste">${camps.map((c) => {
+    const st = stats.get(String(c.id));
+    return `<div class="nl-ligne">
+      <div class="nl-corps">${lienArticle(c.titre, c.lien)}<div class="nl-meta">Envoy\xE9 le ${dateFr2(c.envoyee_le, false)} \xB7 ${st ? st.livres : c.destinataires ?? "?"} livr\xE9s${st?.desabonnements ? ` \xB7 ${st.desabonnements} d\xE9sabonnement(s)` : ""}</div></div>
+      <div class="nl-chiffres">
+        <div><b>${st ? pourcent(st.tauxOuverture) : "—"}</b><span>ouverture</span></div>
+        <div><b>${st ? pourcent(st.tauxClic) : "—"}</b><span>clic</span></div>
+      </div>
+      <a class="nl-lien" href="?cle=${cle}&page=newsletter&campagne=${encodeURIComponent(c.id)}">D\xE9tail</a>
+    </div>`;
+  }).join("")}</div>` : `<p class="nl-sous">Aucun article envoy\xE9 pour l'instant.</p>`}
 
-  <section><h2>Articles envoy\xE9s</h2>${tableauHtml(
-    [
-      { nom: "Article" },
-      { nom: "Livr\xE9s", classe: "num" },
-      { nom: "Ont ouvert", classe: "num" },
-      { nom: "Ont cliqu\xE9", classe: "num" },
-      { nom: "D\xE9sabo.", classe: "num" },
-      { nom: "Envoy\xE9e", classe: "nowrap" },
-      { nom: "" }
-    ],
-    camps.map(ligne),
-    "Aucune campagne depuis la mise en service du journal.",
-    "tab-campagnes"
-  )}</section>
-
-  <div class="note"><b>Sur les taux d'ouverture.</b> Apple Mail pr\xE9charge les images de tous les
-    messages qu'il re\xE7oit, ce qui compte comme une ouverture m\xEAme si personne n'a lu. Le taux de
-    clic est donc l'indicateur le plus fiable des deux.</div>`;
+  <details class="nl-aide"><summary>Comment \xE7a marche</summary>
+    <p>Toutes les 15 minutes, l'application lit le flux de votre blog. Un nouvel article part le jour m\xEAme${sesOk ? " par Amazon SES vers chaque contact de votre liste Brevo, avec un lien de d\xE9sinscription" : " en campagne Brevo"}. S'il n'est pas parti ce jour-l\xE0, il passe dans \xAB \xC0 envoyer \xBB.</p>
+    <p>Le taux de clic est l'indicateur le plus fiable : Apple Mail pr\xE9charge les images, ce qui compte comme une ouverture m\xEAme si personne n'a lu.</p>
+    <p style="font-size:13px">Flux : ${echapper(env.FEED_URL || "non configur\xE9")} \xB7 liste ${echapper(env.BREVO_LIST || "—")} \xB7 exp\xE9diteur ${echapper(env.SENDER_EMAIL || "—")} \xB7 ${nbExec[0]?.n ?? 0} v\xE9rifications</p>
+  </details>
+  </div>`;
 }
 __name(pageNewsletter, "pageNewsletter");
 __name2(pageNewsletter, "pageNewsletter");
