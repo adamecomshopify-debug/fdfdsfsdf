@@ -5686,7 +5686,7 @@ function blogHandle(texte) {
   return String(texte || "").normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase().replace(/&/g, " et ").replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 80).replace(/-+$/g, "");
 }
 async function blogGeminiTexte(env, input, schema) {
-  const essais = [env.GEMINI_BLOG_MODEL, "gemini-3.7-flash", "gemini-3.5-flash", "gemini-3.7-flash"].filter(Boolean);
+  const essais = [env.GEMINI_BLOG_MODEL, "gemini-3.7-flash", "gemini-3.5-flash", "gemini-3.5-flash-lite"].filter(Boolean);
   let derniereErreur = "";
   for (const [n, modele] of essais.entries()) {
     if (n > 0) await new Promise((r) => setTimeout(r, 1500));
