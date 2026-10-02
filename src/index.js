@@ -5653,6 +5653,318 @@ N'invente aucune statistique, aucun r\xE9sultat ni aucune URL. Cette recherche s
 __name(lancerRechercheGemini, "lancerRechercheGemini");
 __name2(lancerRechercheGemini, "lancerRechercheGemini");
 __name22(lancerRechercheGemini, "lancerRechercheGemini");
+var BLOG_ESSAIS_MAX = 3;
+var BLOG_IMAGE_MAX = 19e5;
+function blogMaintenantParis() {
+  const p = Object.fromEntries(new Intl.DateTimeFormat("en-CA", { timeZone: "Europe/Paris", year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).formatToParts(/* @__PURE__ */ new Date()).map((x) => [x.type, x.value]));
+  return { jour: `${p.year}${p.month}${p.day}`, heure: `${p.hour}:${p.minute}` };
+}
+async function assurerBlogRedactionSchema(db) {
+  const colonnes = new Set((await tous2(db, "PRAGMA table_info(blog_dossiers)")).map((c) => c.name));
+  if (!colonnes.has("essais")) await db.prepare("ALTER TABLE blog_dossiers ADD COLUMN essais INTEGER NOT NULL DEFAULT 0").run();
+  if (!colonnes.has("verrou")) await db.prepare("ALTER TABLE blog_dossiers ADD COLUMN verrou TEXT").run();
+  if (!colonnes.has("origine")) await db.prepare("ALTER TABLE blog_dossiers ADD COLUMN origine TEXT").run();
+  if (!colonnes.has("mot_cle")) await db.prepare("ALTER TABLE blog_dossiers ADD COLUMN mot_cle TEXT").run();
+}
+async function blogNouveauDossier(env, { manuel = false } = {}) {
+  await assurerBlogSchema(env.DB);
+  await assurerBlogRedactionSchema(env.DB);
+  const { jour } = blogMaintenantParis();
+  const existants = await tous2(env.DB, "SELECT id,statut FROM blog_dossiers WHERE id LIKE ?", `ADAMSEO-${jour}-%`);
+  if (!manuel && existants.length) return { deja: true };
+  if (existants.some((d) => d.statut === "preparation")) return { erreur: "Un article est d\xE9j\xE0 en cours de r\xE9daction. Il sera pr\xEAt dans quelques minutes." };
+  const numeros = existants.map((d) => Number(d.id.slice(-2)) || 0);
+  const n = Math.max(0, ...numeros) + 1;
+  if (n > 99) return { erreur: "Trop d'articles cr\xE9\xE9s aujourd'hui." };
+  const id = `ADAMSEO-${jour}-${String(n).padStart(2, "0")}`;
+  const maintenant = (/* @__PURE__ */ new Date()).toISOString();
+  await env.DB.prepare(`INSERT INTO blog_dossiers (id,titre,statut,revision,image_ok,html_ok,message,essais,origine,cree_le,maj_le)
+    VALUES (?,?,'preparation',1,0,0,?,0,'app',?,?)`).bind(id, "Article en cours de r\xE9daction", "R\xE9daction du texte par Gemini…", maintenant, maintenant).run();
+  return { id };
+}
+function blogHandle(texte) {
+  return String(texte || "").normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase().replace(/&/g, " et ").replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 80).replace(/-+$/g, "");
+}
+async function blogGeminiTexte(env, input, schema) {
+  const essais = [env.GEMINI_BLOG_MODEL, "gemini-3.7-flash", "gemini-3.5-flash", "gemini-3.7-flash"].filter(Boolean);
+  let derniereErreur = "";
+  for (const [n, modele] of essais.entries()) {
+    if (n > 0) await new Promise((r) => setTimeout(r, 1500));
+    const reponse = await fetch("https://generativelanguage.googleapis.com/v1beta/interactions", {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-goog-api-key": env.GEMINI_API_KEY },
+      body: JSON.stringify({ model: modele, input, tools: [{ type: "google_search" }], response_format: { type: "text", mime_type: "application/json", schema } }),
+      signal: AbortSignal.timeout(24e4)
+    }).catch((e) => ({ ok: false, status: 0, json: async () => ({ message: String(e?.message || e) }) }));
+    const corps = await reponse.json().catch(() => null);
+    if (reponse.ok) {
+      const texte = texteInteractionGemini(corps);
+      try {
+        return JSON.parse(texte);
+      } catch {
+        derniereErreur = "r\xE9ponse illisible";
+        continue;
+      }
+    }
+    derniereErreur = erreurInteractionGemini(corps);
+    if (![0, 404, 429, 500, 503].includes(reponse.status) && !/demand|overload|unavailable|quota|not found|no longer available/i.test(derniereErreur)) break;
+  }
+  throw new Error(`Gemini (texte) : ${derniereErreur}`);
+}
+async function blogRedigerTexte(env, dossier) {
+  const deja = await tous2(env.DB, "SELECT titre FROM blog_dossiers WHERE id!=? ORDER BY cree_le DESC LIMIT 60", dossier.id);
+  const titresDeja = deja.map((d) => `- ${d.titre}`).join("\n") || "- (aucun)";
+  const schema = {
+    type: "object",
+    properties: {
+      titre: { type: "string" },
+      mot_cle: { type: "string" },
+      seo_title: { type: "string" },
+      meta_description: { type: "string" },
+      resume: { type: "string" },
+      tags: { type: "array", items: { type: "string" } },
+      alt_image: { type: "string" },
+      html: { type: "string" }
+    },
+    required: ["titre", "mot_cle", "seo_title", "meta_description", "resume", "tags", "alt_image", "html"]
+  };
+  const input = `Tu es le r\xE9dacteur SEO d'AdamEcom (adam-ecom.com), expert Shopify, CRO (optimisation du taux de conversion) et e-commerce. Le blog s'adresse \xE0 des marchands Shopify francophones qui ont d\xE9j\xE0 du trafic et veulent vendre davantage.
+
+Choisis toi-m\xEAme un sujet utile et recherch\xE9 sur Google en fran\xE7ais (Shopify, conversion, fiche produit, panier, checkout, confiance, mobile, vitesse, SEO e-commerce, publicit\xE9 Meta/Google pour Shopify, fid\xE9lisation, emailing…). Utilise Google Search pour v\xE9rifier l'intention de recherche et les nouveaut\xE9s Shopify r\xE9centes.
+
+Le sujet doit \xEAtre diff\xE9rent de ces articles d\xE9j\xE0 \xE9crits (ne reprends ni le m\xEAme sujet ni le m\xEAme angle) :
+${titresDeja}
+
+R\xE9dige un article complet en fran\xE7ais, de 1 800 \xE0 2 500 mots, concret, actionnable, sans remplissage.
+
+R\xE8gles du HTML (champ html) :
+- structure : <article><header><h1>Titre</h1><p>introduction</p></header> puis plusieurs <section><h2>…</h2>…</section>, avec <h3>, <p>, <ul>/<ol>/<li>, <strong>, <table> si utile, et une section FAQ (<h2>Questions fr\xE9quentes</h2> avec des <h3>) puis une conclusion ; fermer </article> ;
+- aucun CSS : pas de balise <style>, pas d'attribut style, pas de class, pas de script, pas d'image ;
+- n'invente aucune statistique, aucun chiffre, aucune \xE9tude, aucun client ni aucune URL ; si tu cites un chiffre, il doit venir d'une source r\xE9elle trouv\xE9e avec Google et la source est nomm\xE9e dans le texte ;
+- ne promets pas de r\xE9sultats garantis ;
+- n'ajoute pas d'appel \xE0 l'action commercial final : l'application ajoute elle-m\xEAme les blocs Shopify et prise d'appel.
+
+Autres champs :
+- titre : 50 \xE0 90 caract\xE8res, accrocheur, avec le mot-cl\xE9 principal ;
+- mot_cle : le mot-cl\xE9 principal vis\xE9 ;
+- seo_title : 60 caract\xE8res maximum ;
+- meta_description : 140 \xE0 160 caract\xE8res ;
+- resume : 1 \xE0 2 phrases (extrait affich\xE9 dans la liste du blog) ;
+- tags : 5 \xE0 8 tags courts, dont \xAB Shopify \xBB ;
+- alt_image : texte alternatif d\xE9crivant une image de couverture abstraite li\xE9e au sujet.
+
+Retourne uniquement le JSON demand\xE9.`;
+  const r = await blogGeminiTexte(env, input, schema);
+  const titre = String(r?.titre || "").trim().slice(0, 240);
+  let html = String(r?.html || "").trim().replace(/^```(?:html)?\s*|\s*```$/g, "");
+  if (!titre) throw new Error("Gemini n'a pas donn\xE9 de titre.");
+  if (html.length < 4e3) throw new Error("Article trop court, nouvel essai.");
+  html = html.replace(/<(style|script)\b[\s\S]*?<\/\1>/gi, "").replace(/\s(?:style|class)\s*=\s*("[^"]*"|'[^']*')/gi, "").replace(/<img\b[^>]*>/gi, "");
+  if (!/^<article/i.test(html)) html = `<article>${html}</article>`;
+  html = appliquerBlocsCommerciaux(html);
+  let handle = blogHandle(titre);
+  const [pris] = await tous2(env.DB, "SELECT id FROM blog_dossiers WHERE handle=? AND id!=?", handle, dossier.id);
+  if (pris) handle = `${handle}-${dossier.id.slice(8, 16)}`.slice(0, 90);
+  const cfg = await env.DB.prepare("SELECT auteur FROM blog_config WHERE id=1").first().catch(() => null);
+  const tags = (Array.isArray(r.tags) ? r.tags : []).map((t) => String(t).replace(/,/g, " ").replace(/\s+/g, " ").trim()).filter(Boolean).slice(0, 10).join(", ");
+  return {
+    titre,
+    handle,
+    mot_cle: String(r.mot_cle || "").trim().slice(0, 120) || null,
+    seo_title: String(r.seo_title || titre).trim().slice(0, 70),
+    meta_description: String(r.meta_description || "").trim().slice(0, 320),
+    resume: String(r.resume || "").trim().slice(0, 500),
+    tags,
+    alt_image: String(r.alt_image || titre).trim().slice(0, 240),
+    auteur: cfg?.auteur || "Adam Ecom",
+    html
+  };
+}
+async function blogModelesImage(env) {
+  const liste = [env.GEMINI_IMAGE_MODEL].filter(Boolean);
+  const r = await fetch("https://generativelanguage.googleapis.com/v1beta/models?pageSize=1000", {
+    headers: { "x-goog-api-key": env.GEMINI_API_KEY },
+    signal: AbortSignal.timeout(2e4)
+  }).catch(() => null);
+  const corps = r?.ok ? await r.json().catch(() => null) : null;
+  const trouves = (corps?.models || []).filter((m) => /gemini.*image/i.test(m.name || "") && (m.supportedGenerationMethods || []).includes("generateContent")).map((m) => String(m.name).replace(/^models\//, ""));
+  const version = (nom) => Number((nom.match(/gemini-(\d+(?:\.\d+)?)/) || [])[1] || 0);
+  trouves.sort((a, b) => version(b) - version(a) || /flash/.test(b) - /flash/.test(a) || /preview/.test(a) - /preview/.test(b));
+  for (const nom of [...trouves, "gemini-2.5-flash-image"]) if (!liste.includes(nom)) liste.push(nom);
+  return liste.slice(0, 4);
+}
+async function blogCreerImage(env, titre) {
+  const cfg = await env.DB.prepare("SELECT prompt_image FROM blog_config WHERE id=1").first().catch(() => null);
+  const prompt = String(cfg?.prompt_image || PROMPT_IMAGE_BLOG).replace("[TITRE OU SUJET DU BLOG]", titre);
+  let derniereErreur = "aucun mod\xE8le d'image disponible";
+  for (const modele of await blogModelesImage(env)) {
+    const reponse = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(modele)}:generateContent`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-goog-api-key": env.GEMINI_API_KEY },
+      body: JSON.stringify({
+        contents: [{ role: "user", parts: [{ text: prompt }] }],
+        generationConfig: { responseModalities: ["IMAGE"], imageConfig: { aspectRatio: "16:9" } }
+      }),
+      signal: AbortSignal.timeout(18e4)
+    }).catch((e) => ({ ok: false, status: 0, json: async () => ({ message: String(e?.message || e) }) }));
+    const corps = await reponse.json().catch(() => null);
+    if (!reponse.ok) {
+      derniereErreur = `${modele} : ${erreurInteractionGemini(corps)}`;
+      continue;
+    }
+    const parts = corps?.candidates?.[0]?.content?.parts || [];
+    const image = parts.map((p) => p.inlineData || p.inline_data).find((d) => d?.data);
+    if (!image) {
+      derniereErreur = `${modele} : aucune image renvoy\xE9e`;
+      continue;
+    }
+    if (image.data.length > BLOG_IMAGE_MAX) {
+      derniereErreur = `${modele} : image trop lourde (${Math.round(image.data.length * 3 / 4 / 1024)} Ko)`;
+      continue;
+    }
+    return { base64: image.data, mime: image.mimeType || image.mime_type || "image/png" };
+  }
+  throw new Error(`Image : ${derniereErreur}`);
+}
+async function blogJetonImage(env, id) {
+  return hexa(await hmacOctets(`blogimage:${env.CLE_TEST || "adamecom"}`, id)).slice(0, 24);
+}
+async function pageImageBlog(env, url) {
+  const m = url.pathname.match(/^\/blog-image\/(ADAMSEO-\d{8}-\d{2})\.(png|jpg|webp)$/);
+  if (!m || url.searchParams.get("s") !== await blogJetonImage(env, m[1])) return new Response("Introuvable", { status: 404 });
+  const d = await env.DB.prepare("SELECT image_base64,image_mime FROM blog_dossiers WHERE id=?").bind(m[1]).first();
+  if (!d?.image_base64) return new Response("Introuvable", { status: 404 });
+  const b64 = d.image_base64.replace(/\s/g, "");
+  let octetsImage;
+  if (typeof Uint8Array.fromBase64 === "function") octetsImage = Uint8Array.fromBase64(b64);
+  else {
+    const binaire = atob(b64);
+    octetsImage = new Uint8Array(binaire.length);
+    for (let i = 0; i < binaire.length; i++) octetsImage[i] = binaire.charCodeAt(i);
+  }
+  return new Response(octetsImage, { headers: { "content-type": d.image_mime || "image/png", "cache-control": "public, max-age=86400" } });
+}
+async function blogPublierShopify(env, dossier) {
+  const cfg = await env.DB.prepare("SELECT boutique,handle_blog,auteur FROM blog_config WHERE id=1").first().catch(() => null);
+  const handleBlog = cfg?.handle_blog || "actualites";
+  const jeton = await jetonShopify(env);
+  const lecture = await shopify(env, jeton, `query BlogEtArticle($qb: String!, $qa: String!) {
+    blogs(first: 5, query: $qb) { nodes { id handle } }
+    articles(first: 5, query: $qa) { nodes { id handle blog { handle } } }
+  }`, { qb: `handle:${handleBlog}`, qa: `handle:${dossier.handle}` });
+  const blog = (lecture?.blogs?.nodes || []).find((b) => b.handle === handleBlog);
+  if (!blog) throw new Error(`Blog Shopify \xAB ${handleBlog} \xBB introuvable.`);
+  const boutique = String(cfg?.boutique || "adam-ecom.com").replace(/^https?:\/\//, "").replace(/\/$/, "");
+  const existant = (lecture?.articles?.nodes || []).find((a) => a.handle === dossier.handle && a.blog?.handle === handleBlog);
+  if (existant) return { id: existant.id, url: `https://${boutique}/blogs/${handleBlog}/${existant.handle}`, deja: true };
+  const origine = (env.APP_ORIGINE || "https://app.adam-ecom.online").replace(/\/$/, "");
+  const ext = /jpe?g/.test(dossier.image_mime || "") ? "jpg" : /webp/.test(dossier.image_mime || "") ? "webp" : "png";
+  const article = {
+    blogId: blog.id,
+    title: dossier.titre,
+    handle: dossier.handle,
+    body: dossier.html,
+    summary: dossier.resume ? `<p>${echapper(dossier.resume)}</p>` : null,
+    author: { name: dossier.auteur || cfg?.auteur || "Adam Ecom" },
+    tags: String(dossier.tags || "").split(",").map((t) => t.trim()).filter(Boolean),
+    isPublished: true,
+    metafields: [
+      dossier.seo_title ? { namespace: "global", key: "title_tag", type: "single_line_text_field", value: dossier.seo_title } : null,
+      dossier.meta_description ? { namespace: "global", key: "description_tag", type: "multi_line_text_field", value: dossier.meta_description } : null
+    ].filter(Boolean)
+  };
+  if (dossier.has_image) article.image = { url: `${origine}/blog-image/${dossier.id}.${ext}?s=${await blogJetonImage(env, dossier.id)}`, altText: dossier.alt_image || dossier.titre };
+  const r = await shopify(env, jeton, `mutation CreerArticle($article: ArticleCreateInput!) {
+    articleCreate(article: $article) { article { id handle } userErrors { field message code } }
+  }`, { article });
+  const erreurs = r?.articleCreate?.userErrors || [];
+  if (erreurs.length || !r?.articleCreate?.article) throw new Error(`Shopify : ${erreurs.map((e) => e.message).join(" ; ") || "article non cr\xE9\xE9"}`);
+  const a = r.articleCreate.article;
+  return { id: a.id, url: `https://${boutique}/blogs/${handleBlog}/${a.handle}` };
+}
+async function blogRedactionEtape(env) {
+  if (!env.DB) return;
+  const db = env.DB;
+  try {
+    const cfg = await db.prepare("SELECT actif,heure_generation FROM blog_config WHERE id=1").first().catch(() => null);
+    if (!cfg) return;
+    const maintenant = (/* @__PURE__ */ new Date()).toISOString();
+    const expire = new Date(Date.now() - 10 * 6e4).toISOString();
+    let dossier = await db.prepare(`SELECT id,titre,handle,statut,html_ok,image_ok,essais,verrou FROM blog_dossiers
+      WHERE statut IN ('valide','publication','preparation') AND (verrou IS NULL OR verrou<?)
+      ORDER BY CASE statut WHEN 'valide' THEN 0 WHEN 'publication' THEN 1 ELSE 2 END, cree_le LIMIT 1`).bind(expire).first().catch(async (e) => {
+      if (/no such column/i.test(String(e?.message || e))) await assurerBlogRedactionSchema(db);
+      return false;
+    });
+    if (dossier === false) return;
+    if (!dossier) {
+      if (!Number(cfg.actif)) return;
+      const { jour, heure } = blogMaintenantParis();
+      if (heure < String(cfg.heure_generation || "08:00")) return;
+      const deja = await db.prepare("SELECT id FROM blog_dossiers WHERE id>=? AND id<? LIMIT 1").bind(`ADAMSEO-${jour}-`, `ADAMSEO-${jour}-~`).first();
+      if (deja) return;
+      const cree = await blogNouveauDossier(env);
+      if (!cree.id) return;
+      dossier = { id: cree.id, titre: "", statut: "preparation", html_ok: 0, image_ok: 0, essais: 0 };
+    }
+    const etape = dossier.statut === "valide" || dossier.statut === "publication" ? "publication" : Number(dossier.html_ok) ? "image" : "texte";
+    if (Number(dossier.essais) >= BLOG_ESSAIS_MAX) {
+      const libelle = etape === "publication" ? "La publication sur Shopify" : etape === "image" ? "La cr\xE9ation de l'image" : "La r\xE9daction du texte";
+      await db.prepare("UPDATE blog_dossiers SET statut='erreur',verrou=NULL,message=?,maj_le=? WHERE id=?").bind(`${libelle} a \xE9chou\xE9 ${BLOG_ESSAIS_MAX} fois (d\xE9lai d\xE9pass\xE9). Utilisez \xAB Relancer \xBB.`, maintenant, dossier.id).run();
+      return;
+    }
+    const pris = await db.prepare("UPDATE blog_dossiers SET verrou=?,essais=essais+1 WHERE id=? AND (verrou IS NULL OR verrou<?)").bind(maintenant, dossier.id, expire).run();
+    if (!pris.meta.changes) return;
+    const dernierEssai = Number(dossier.essais) + 1 >= BLOG_ESSAIS_MAX;
+    try {
+      if (!env.GEMINI_API_KEY && etape !== "publication") throw new Error("La connexion Gemini n'est pas configur\xE9e dans Cloudflare.");
+      if (etape === "texte") {
+        const t = await blogRedigerTexte(env, dossier);
+        await db.prepare(`UPDATE blog_dossiers SET titre=?,handle=?,mot_cle=?,seo_title=?,meta_description=?,resume=?,tags=?,alt_image=?,auteur=?,html=?,html_ok=1,
+          essais=0,verrou=NULL,message=?,maj_le=? WHERE id=?`).bind(t.titre, t.handle, t.mot_cle, t.seo_title, t.meta_description, t.resume, t.tags, t.alt_image, t.auteur, t.html, "Texte r\xE9dig\xE9. Cr\xE9ation de l'image de couverture…", (/* @__PURE__ */ new Date()).toISOString(), dossier.id).run();
+      } else if (etape === "image") {
+        const img = await blogCreerImage(env, dossier.titre);
+        await db.prepare(`UPDATE blog_dossiers SET image_base64=?,image_mime=?,image_nom=?,image_ok=1,statut='pret_validation',essais=0,verrou=NULL,message=?,maj_le=? WHERE id=?`).bind(img.base64, img.mime, `${dossier.handle || dossier.id}.${/jpe?g/.test(img.mime) ? "jpg" : "png"}`, "Article r\xE9dig\xE9 par l'application. Relisez-le puis validez-le pour le publier sur Shopify.", (/* @__PURE__ */ new Date()).toISOString(), dossier.id).run();
+      } else {
+        await db.prepare("UPDATE blog_dossiers SET statut='publication',message=?,maj_le=? WHERE id=?").bind("Publication sur Shopify en cours…", maintenant, dossier.id).run();
+        const complet = await db.prepare("SELECT id,titre,handle,html,resume,auteur,tags,seo_title,meta_description,alt_image,image_mime,image_base64 IS NOT NULL AS has_image FROM blog_dossiers WHERE id=?").bind(dossier.id).first();
+        if (!complet?.html || !complet.handle) throw new Error("Le dossier n'a pas de texte ou d'adresse d'article.");
+        const p = await blogPublierShopify(env, complet);
+        await db.prepare("UPDATE blog_dossiers SET statut='publie',article_shopify_id=?,url_publique=?,essais=0,verrou=NULL,message=?,maj_le=? WHERE id=?").bind(p.id, p.url, p.deja ? "Cet article existait d\xE9j\xE0 sur Shopify : il a \xE9t\xE9 rattach\xE9 au dossier." : "Publi\xE9 sur Shopify.", (/* @__PURE__ */ new Date()).toISOString(), dossier.id).run();
+      }
+    } catch (e) {
+      let msg = String(e?.message || e).slice(0, 600);
+      if (etape === "publication" && /access|scope|denied|write_content/i.test(msg)) msg += " — l'application Shopify doit avoir l'autorisation \xAB write_content \xBB.";
+      const fin = dernierEssai || etape === "publication" && !/429|5\d\d|timeout|throttl/i.test(msg);
+      await db.prepare(`UPDATE blog_dossiers SET verrou=?,statut=?,message=?,maj_le=? WHERE id=?`).bind(
+        fin ? null : new Date(Date.now() - 7 * 6e4).toISOString(),
+        fin ? "erreur" : etape === "publication" ? "valide" : "preparation",
+        fin ? msg : `Nouvel essai dans quelques minutes (${msg})`,
+        (/* @__PURE__ */ new Date()).toISOString(),
+        dossier.id
+      ).run();
+    }
+  } catch (e) {
+    console.error("blogRedactionEtape:", e?.message || e);
+  }
+}
+async function blogRelancer(db, id) {
+  await assurerBlogRedactionSchema(db);
+  const d = await db.prepare("SELECT statut,html_ok,image_ok FROM blog_dossiers WHERE id=?").bind(id).first();
+  if (!d || d.statut !== "erreur") return { erreur: "Ce dossier n'est pas en erreur." };
+  const versPublication = Number(d.html_ok) && Number(d.image_ok);
+  await db.prepare("UPDATE blog_dossiers SET statut=?,essais=0,verrou=NULL,message=?,maj_le=? WHERE id=?").bind(
+    versPublication ? "pret_validation" : "preparation",
+    versPublication ? "Dossier remis en attente de validation." : "Nouvel essai de r\xE9daction…",
+    (/* @__PURE__ */ new Date()).toISOString(),
+    id
+  ).run();
+  return { ok: true };
+}
+async function blogSupprimer(db, id) {
+  const r = await db.prepare("DELETE FROM blog_dossiers WHERE id=? AND statut IN ('preparation','pret_validation','erreur') AND article_shopify_id IS NULL").bind(id).run();
+  return r.meta.changes ? { ok: true } : { erreur: "Ce dossier ne peut pas \xEAtre supprim\xE9 (d\xE9j\xE0 valid\xE9 ou publi\xE9)." };
+}
 var SEO_VIDES = /* @__PURE__ */ new Set([
   "le",
   "la",
@@ -6348,6 +6660,7 @@ async function pageBlog(env, url, message = "") {
   const db = env.DB;
   await assurerBlogSchema(db);
   await assurerGeminiSchema(db);
+  await assurerBlogRedactionSchema(db);
   const [configuration] = await tous2(db, "SELECT * FROM blog_config WHERE id=1");
   const dossiers = await tous2(db, "SELECT id,titre,handle,statut,revision,slack_thread_ts,image_ok,html_ok,validation_texte,article_shopify_id,url_publique,message,seo_title,meta_description,resume,auteur,tags,alt_image,image_url,image_mime,image_nom,cree_le,maj_le FROM blog_dossiers ORDER BY maj_le DESC LIMIT 40");
   const recherchesGemini = await tous2(db, "SELECT id,sujet,modele,statut,resultat_json,erreur,cree_le,maj_le FROM gemini_recherches ORDER BY maj_le DESC LIMIT 10");
@@ -6360,11 +6673,13 @@ async function pageBlog(env, url, message = "") {
       briefGemini = null;
     }
   }
-  const [courant] = dossiers[0] ? await tous2(
+  const choisi = dossiers.find((d) => d.id === url.searchParams.get("dossier")) || dossiers[0];
+  const [courant] = choisi ? await tous2(
     db,
     "SELECT id,titre,handle,statut,revision,slack_thread_ts,image_ok,html_ok,validation_texte,article_shopify_id,url_publique,message,seo_title,meta_description,resume,auteur,tags,alt_image,html,image_url,image_base64,image_mime,image_nom,cree_le,maj_le FROM blog_dossiers WHERE id=?",
-    dossiers[0].id
+    choisi.id
   ) : [];
+  const enAttente = dossiers.filter((d) => ["preparation", "pret_validation", "valide", "publication", "erreur"].includes(d.statut));
   const cfg = configuration || {
     actif: 1,
     heure_generation: "08:00",
@@ -6404,15 +6719,27 @@ async function pageBlog(env, url, message = "") {
   ${message || ""}
   <section><div class="grille">
     <div class="carte ${Number(cfg.actif) ? "bon" : "mauvais"}"><div class="k">Cr\xE9ation SEO</div>
-      <div class="v txt">${Number(cfg.actif) ? "active" : "arr\xEAt\xE9e"}</div><div class="s">chaque jour \xE0 ${echapper(cfg.heure_generation || "08:00")}</div></div>
+      <div class="v txt">${Number(cfg.actif) ? "active" : "arr\xEAt\xE9e"}</div><div class="s">un article r\xE9dig\xE9 par l'app chaque jour \xE0 ${echapper(cfg.heure_generation || "08:00")}</div></div>
     <div class="carte bon"><div class="k">Validation</div><div class="v txt">dans l\u2019application</div>
       <div class="s">bouton s\xE9curis\xE9 sur le dossier courant</div></div>
-    <div class="carte moyen"><div class="k">Publication Shopify</div><div class="v txt">verrouill\xE9e</div>
+    <div class="carte moyen"><div class="k">Publication Shopify</div><div class="v txt">automatique</div>
       <div class="s">uniquement apr\xE8s votre clic de validation</div></div>
     <div class="carte ${courant?.statut === "publie" ? "bon" : courant?.statut === "erreur" ? "mauvais" : "moyen"}">
       <div class="k">Dossier actuel</div><div class="v txt">${courant ? etat(courant.statut) : "aucun dossier"}</div>
       <div class="s">${courant ? `${echapper(courant.id)} \xB7 ${depuis(courant.maj_le)}` : "\u2014"}</div></div>
   </div></section>
+
+  <section><h2>Articles \xE0 relire</h2>
+  <form method="POST" action="?cle=${cle}&page=blog&action=rediger_blog" style="margin-bottom:12px">
+    <button class="envoyer" type="submit" onclick="this.disabled=true;this.textContent='R\xE9daction lanc\xE9e\u2026';this.form.submit()">R\xE9diger un article maintenant</button>
+    <span class="sec" style="margin-left:8px">En plus de l'article automatique du jour.</span>
+  </form>
+  ${enAttente.length ? tableauHtml(
+    [{ nom: "Article" }, { nom: "Statut" }, { nom: "Cr\xE9\xE9", classe: "nowrap" }, { nom: "" }],
+    enAttente.map((d) => `<tr${courant?.id === d.id ? ' style="background:#f0fdf4"' : ""}><td>${echapper(d.titre)}<br><span class="sec">${echapper(d.message || "")}</span></td><td>${etat(d.statut)}</td>
+      <td class="nowrap">${dateFr2(d.cree_le)}</td><td>${courant?.id === d.id ? '<span class="sec">affich\xE9 ci-dessous</span>' : `<a class="bouton" href="?cle=${cle}&page=blog&dossier=${encodeURIComponent(d.id)}">Ouvrir</a>`}</td></tr>`),
+    ""
+  ) : '<div class="note">Aucun article en attente. Le prochain sera r\xE9dig\xE9 automatiquement.</div>'}</section>
 
   <section><h2>Recherche Gemini SEO</h2><div class="grille">
     <div class="carte ${env.GEMINI_API_KEY ? "bon" : "mauvais"}"><div class="k">Connexion Gemini</div>
@@ -6456,8 +6783,12 @@ async function pageBlog(env, url, message = "") {
     <input type="hidden" name="id" value="${echapper(courant.id)}">
     <input type="hidden" name="revision" value="${Number(courant.revision) || 1}">
     <button class="envoyer" type="submit" onclick="return confirm('Valider cet article et autoriser sa publication sur Shopify ?')">
-      Valider cet article dans l\u2019application</button>
-  </form>` : ""}</section>` : ""}
+      Valider et publier sur Shopify</button>
+  </form>` : ""}
+  ${courant.statut === "erreur" ? `<form method="POST" action="?cle=${cle}&page=blog&action=relancer_blog" style="margin-top:12px;display:inline-block">
+    <input type="hidden" name="id" value="${echapper(courant.id)}"><button class="envoyer" type="submit">Relancer</button></form>` : ""}
+  ${["preparation", "pret_validation", "erreur"].includes(courant.statut) && !courant.article_shopify_id ? `<form method="POST" action="?cle=${cle}&page=blog&action=supprimer_blog" style="margin:12px 0 0 8px;display:inline-block">
+    <input type="hidden" name="id" value="${echapper(courant.id)}"><button class="envoyer discret" type="submit" onclick="return confirm('Supprimer d\xE9finitivement ce dossier ? Il ne sera pas publi\xE9.')">Supprimer ce dossier</button></form>` : ""}</section>` : ""}
 
   ${courant && (courant.seo_title || courant.meta_description || courant.resume || courant.tags) ? `<section><h2>Dossier SEO</h2><div class="tw"><table><tbody>
     <tr><th>Titre SEO</th><td>${echapper(courant.seo_title || courant.titre)}</td></tr>
@@ -6480,7 +6811,7 @@ async function pageBlog(env, url, message = "") {
     <tr><th>Blog Shopify</th><td>${echapper(cfg.blog || "Actualit\xE9s")} <span class="sec">(${echapper(cfg.handle_blog || "actualites")})</span></td></tr>
     <tr><th>Auteur</th><td>${echapper(cfg.auteur || "Adam Ecom")}</td></tr>
     <tr><th>Lieu de validation</th><td><b>Application AdamEcom uniquement</b></td></tr>
-    <tr><th>Action requise</th><td>Clic sur le bouton de validation du dernier dossier complet.</td></tr>
+    <tr><th>Action requise</th><td>Clic sur \xAB Valider et publier sur Shopify \xBB dans le dossier choisi.</td></tr>
     <tr><th>S\xE9curit\xE9</th><td>Aucun article n\u2019est publi\xE9 sans ce clic explicite, contr\xF4le anti-doublon et v\xE9rification de l\u2019URL publique.</td></tr>
   </tbody></table></div></section>
 
@@ -6492,7 +6823,7 @@ async function pageBlog(env, url, message = "") {
     [{ nom: "Dossier" }, { nom: "Article" }, { nom: "Statut" }, { nom: "Mise \xE0 jour", classe: "nowrap" }, { nom: "Lien" }],
     dossiers.map((d) => `<tr><td class="nowrap"><b>${echapper(d.id)}</b><br><span class="sec">r\xE9vision ${d.revision || 1}</span></td>
       <td>${echapper(d.titre)}<br><span class="sec">${echapper(d.handle || "")}</span></td><td>${etat(d.statut)}</td>
-      <td class="nowrap">${dateFr2(d.maj_le)}</td><td>${d.url_publique ? `<a class="bouton" href="${echapper(d.url_publique)}" target="_blank" rel="noopener">Ouvrir</a>` : "\u2014"}</td></tr>`),
+      <td class="nowrap">${dateFr2(d.maj_le)}</td><td>${d.url_publique ? `<a class="bouton" href="${echapper(d.url_publique)}" target="_blank" rel="noopener">Voir en ligne</a>` : `<a class="bouton" href="?cle=${cle}&page=blog&dossier=${encodeURIComponent(d.id)}">Ouvrir</a>`}</td></tr>`),
     "Aucun dossier SEO enregistr\xE9."
   )}</section>
 
@@ -11382,7 +11713,7 @@ async function application(env, url, request) {
       }
       const r = await seoAnalyserDossier(env, dossier);
       const q = r.erreur ? "&err=" + encodeURIComponent(r.erreur) : "&seo=" + r.score + (r.pageAnalysee ? "" : "&seopart=1");
-      return Response.redirect(`${url.origin}/?cle=${cle}&page=blog${q}`, 303);
+      return Response.redirect(`${url.origin}/?cle=${cle}&page=blog${q}&dossier=${encodeURIComponent(dossier)}`, 303);
     }
     if (action === "valider_blog") {
       await assurerBlogSchema(env.DB);
@@ -11402,7 +11733,16 @@ async function application(env, url, request) {
       if (!r.meta.changes) {
         return Response.redirect(`${url.origin}/?cle=${cle}&page=blog&err=${encodeURIComponent("Ce dossier n\u2019est plus validable ou sa derni\xE8re version n\u2019est pas compl\xE8te.")}`, 303);
       }
-      return Response.redirect(`${url.origin}/?cle=${cle}&page=blog&blogvalide=${encodeURIComponent(id)}`, 303);
+      return Response.redirect(`${url.origin}/?cle=${cle}&page=blog&blogvalide=${encodeURIComponent(id)}&dossier=${encodeURIComponent(id)}`, 303);
+    } else if (action === "rediger_blog") {
+      const r = await blogNouveauDossier(env, { manuel: true });
+      const q = r.erreur ? `&err=${encodeURIComponent(r.erreur)}` : `&blogredac=${encodeURIComponent(r.id)}&dossier=${encodeURIComponent(r.id)}`;
+      return Response.redirect(`${url.origin}/?cle=${cle}&page=blog${q}`, 303);
+    } else if (action === "relancer_blog" || action === "supprimer_blog") {
+      const id = String(form.get("id") || "").trim();
+      const r = !/^ADAMSEO-\d{8}-\d{2}$/.test(id) ? { erreur: "Dossier de blog invalide." } : action === "relancer_blog" ? await blogRelancer(env.DB, id) : await blogSupprimer(env.DB, id);
+      const q = r.erreur ? `&err=${encodeURIComponent(r.erreur)}&dossier=${encodeURIComponent(id)}` : action === "relancer_blog" ? `&blogrelance=1&dossier=${encodeURIComponent(id)}` : "&blogsupp=1";
+      return Response.redirect(`${url.origin}/?cle=${cle}&page=blog${q}`, 303);
     } else if (action === "recherche_gemini") {
       const r = await lancerRechercheGemini(env, form.get("sujet"));
       const q = r.erreur ? `&err=${encodeURIComponent(r.erreur)}` : `&geminiok=${encodeURIComponent(String(r.id))}`;
@@ -11638,7 +11978,10 @@ async function application(env, url, request) {
   if (annul) message = annul === "prevenu" ? `<div class="reussite">Facture annul\xE9e. Le client a \xE9t\xE9 pr\xE9venu par email.</div>` : `<div class="reussite">${surMeeting ? "Rendez-vous annul\xE9." : "Facture annul\xE9e. Elle conserve son num\xE9ro."}</div>`;
   if (url.searchParams.get("supp")) message = `<div class="reussite">Rendez-vous supprim\xE9.</div>`;
   const blogValide = url.searchParams.get("blogvalide");
-  if (blogValide) message = `<div class="reussite"><b>${echapper(blogValide)}</b> est valid\xE9 dans l\u2019application. La publication Shopify est maintenant autoris\xE9e.</div>`;
+  if (blogValide) message = `<div class="reussite"><b>${echapper(blogValide)}</b> est valid\xE9. L'application le publie sur Shopify dans la minute : rafra\xEEchissez la page pour voir le lien de l'article.</div>`;
+  if (url.searchParams.get("blogredac")) message = `<div class="reussite">R\xE9daction lanc\xE9e. Gemini \xE9crit l'article puis cr\xE9e l'image : comptez quelques minutes, puis rafra\xEEchissez la page.</div>`;
+  if (url.searchParams.get("blogrelance")) message = `<div class="reussite">Dossier relanc\xE9.</div>`;
+  if (url.searchParams.get("blogsupp")) message = `<div class="reussite">Dossier supprim\xE9.</div>`;
   const geminiOk = url.searchParams.get("geminiok");
   if (geminiOk) message = `<div class="reussite">Recherche Gemini termin\xE9e. Le nouveau brief SEO public est disponible ci-dessous.</div>`;
   const paye = url.searchParams.get("paye");
@@ -11735,7 +12078,7 @@ var index_default = {
         radarModeAuto(env.DB).then((auto) => auto ? lancer("radar", executerRadar, env) : null)
       ]));
     } else {
-      ctx.waitUntil(Promise.all([lancer("calendly", executer, env), smtpTestEnAttente(env), radarEnvoisProgrammes(env), radarContactsEnAttente(env), radarQualiteEnAttente(env), radarRechercheEtape(env), newsletterSesEtape(env), sesTestEnAttente(env)]));
+      ctx.waitUntil(Promise.all([lancer("calendly", executer, env), smtpTestEnAttente(env), radarEnvoisProgrammes(env), radarContactsEnAttente(env), radarQualiteEnAttente(env), radarRechercheEtape(env), newsletterSesEtape(env), sesTestEnAttente(env), blogRedactionEtape(env)]));
     }
   },
   // Déclenchement manuel, pratique pour tester sans attendre la planification.
@@ -11752,6 +12095,7 @@ var index_default = {
       return Response.redirect(r.ok ? `${base}&gok=1` : `${base}&err=${encodeURIComponent(r.erreur)}`, 302);
     }
     if (url.pathname === "/desabo") return pageDesabo(env, request, url);
+    if (url.pathname.startsWith("/blog-image/")) return pageImageBlog(env, url);
     if (url.pathname.startsWith("/r/")) {
       const r = await radarSuiviEmail(env, url);
       if (r) return r;
