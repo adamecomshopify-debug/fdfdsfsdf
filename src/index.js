@@ -1693,6 +1693,48 @@ async function marquerPayee(env, numero) {
   return { ok: true, commande: commande.name, id: commande.id.split("/").pop() };
 }
 __name(marquerPayee, "marquerPayee");
+// Email « Paiement bien reçu » envoyé au client après « Marquer comme payée ».
+async function envoyerConfirmationPaiement(env, numero, origine) {
+  const f = await lireFacture(env.DB, numero);
+  if (!f?.client_email) return { erreur: "pas d'email client sur la facture" };
+  if (!await emailAutorise(env, "facture_payee")) {
+    await noterEnvoi(env, "facture_payee", f.client_email, null, "bloqu\xE9", "mod\xE8le en pause");
+    return { pause: true };
+  }
+  const valeurs = { numero: f.numero, client: f.client_nom, montant: euros(f.montant), prestation: f.prestation };
+  const def = EMAILS.find((m) => m.id === "facture_payee");
+  const perso = await env.DB.prepare("SELECT intro FROM emails_modeles WHERE id = ?").bind("facture_payee").first().catch(() => null);
+  const intro = remplirGabarit(perso?.intro || def.intro, valeurs);
+  const objet = await objetEmail(env, "facture_payee", remplirGabarit(def.objet, valeurs), valeurs);
+  const lien = `${origine}/f/${f.jeton}`;
+  const corps = `<!doctype html><html lang="fr"><head><meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1"></head>
+    <body style="margin:0;padding:24px 0;background:#EFEDE7">
+    <div style="font-family:Helvetica,Arial,sans-serif;font-size:15px;line-height:1.65;color:#1B1B1B;max-width:600px;margin:0 auto;padding:24px;background:#fff;border-radius:10px">
+      <p>Bonjour ${echapper(f.client_nom || "")},</p>
+      <p>${echapper(intro).replace(/\n/g, "<br>")}</p>
+      <p style="margin:24px 0"><a href="${echapper(lien)}" style="display:inline-block;background:#3F7A34;color:#fff;font-weight:700;padding:13px 24px;border-radius:6px;text-decoration:none">Voir ma facture</a></p>
+      <p>Bien \xE0 vous,<br><b>Adam</b><br><span style="color:#6B6B6B">Consultant Shopify &amp; CRO \u2014 AdamEcom</span></p>
+    </div></body></html>`;
+  try {
+    await brevo(env, "/smtp/email", {
+      method: "POST",
+      body: JSON.stringify({
+        sender: { name: "AdamEcom", email: env.SENDER_EMAIL },
+        to: [{ email: f.client_email, name: f.client_nom }],
+        replyTo: { email: env.SENDER_EMAIL, name: "AdamEcom" },
+        subject: objet,
+        htmlContent: corps
+      })
+    });
+    await noterEnvoi(env, "facture_payee", f.client_email, objet, "envoy\xE9", null);
+    return { ok: true, email: f.client_email };
+  } catch (e) {
+    await noterEnvoi(env, "facture_payee", f.client_email, objet, "\xE9chec", e.message);
+    return { erreur: e.message };
+  }
+}
+__name(envoyerConfirmationPaiement, "envoyerConfirmationPaiement");
 __name2(marquerPayee, "marquerPayee");
 __name22(marquerPayee, "marquerPayee");
 async function modifierFacture(env, numero, form) {
@@ -7166,7 +7208,7 @@ async function pageFacture(env, url, message) {
           <button class="envoyer" type="submit" style="background:#3F7A34;color:#fff"
             onclick="return confirm('Marquer la facture n\xB0 ${f.numero} comme pay\xE9e ?
 
-Une vraie commande de ${euros3(f.montant)} sera cr\xE9\xE9e dans Shopify et comptera dans votre chiffre d'affaires.')">
+Une vraie commande de ${euros3(f.montant)} sera cr\xE9\xE9e dans Shopify et comptera dans votre chiffre d'affaires.${f.client_email ? `\n\nUn email de confirmation de paiement sera envoy\xE9 \xE0 ${echapper(f.client_email)}.` : ""}')">
             ${ic("valide")} Marquer comme pay\xE9e</button>
         </form>`}
         <a class="bouton" href="${lien}" target="_blank" rel="noopener">Ouvrir / imprimer</a>
@@ -10853,6 +10895,17 @@ var EMAILS = [
     role: "Transmet la facture au client, avec le lien vers sa version imprimable."
   },
   {
+    id: "facture_payee",
+    nom: "Confirmation de paiement",
+    quand: "Quand vous cliquez sur \xAB Marquer comme pay\xE9e \xBB",
+    vers: "Le client",
+    auto: true,
+    variables: ["{numero}", "{client}", "{montant}", "{prestation}"],
+    objet: "Paiement bien re\xE7u \u2014 facture n\xB0 {numero}",
+    intro: "Nous avons bien re\xE7u votre paiement de {montant} pour la facture n\xB0 {numero} (\xAB {prestation} \xBB). Merci pour votre confiance !",
+    role: "Confirme au client que son paiement a bien \xE9t\xE9 re\xE7u, avec le lien vers sa facture."
+  },
+  {
     id: "facture_annulation",
     nom: "Annulation d'une facture",
     quand: "Quand vous annulez une facture d\xE9j\xE0 envoy\xE9e",
@@ -11526,7 +11579,11 @@ async function application(env, url, request) {
       return Response.redirect(`${url.origin}/?cle=${cle}&page=meeting&id=${url.searchParams.get("id")}${q}`, 303);
     } else if (action === "payee") {
       const r = await marquerPayee(env, Number(url.searchParams.get("numero")));
-      const q = r.erreur ? `&err=${encodeURIComponent(r.erreur)}` : `&paye=${encodeURIComponent(r.commande)}`;
+      let q = r.erreur ? `&err=${encodeURIComponent(r.erreur)}` : `&paye=${encodeURIComponent(r.commande)}`;
+      if (!r.erreur) {
+        const c = await envoyerConfirmationPaiement(env, Number(url.searchParams.get("numero")), url.origin);
+        q += c.ok ? `&pmail=${encodeURIComponent(c.email)}` : c.pause ? "&pmail=pause" : `&pmailerr=${encodeURIComponent(c.erreur)}`;
+      }
       return Response.redirect(`${url.origin}/?cle=${cle}&page=facture&numero=${url.searchParams.get("numero")}${q}`, 303);
     } else if (action === "envoyer") {
       const r = await envoyerFacture(env, Number(url.searchParams.get("numero")), url.origin);
@@ -11575,7 +11632,11 @@ async function application(env, url, request) {
   const geminiOk = url.searchParams.get("geminiok");
   if (geminiOk) message = `<div class="reussite">Recherche Gemini termin\xE9e. Le nouveau brief SEO public est disponible ci-dessous.</div>`;
   const paye = url.searchParams.get("paye");
-  if (paye) message = `<div class="reussite">Facture encaiss\xE9e. Commande <b>${echapper(paye)}</b> cr\xE9\xE9e dans Shopify.</div>`;
+  if (paye) {
+    const pmail = url.searchParams.get("pmail"), pmailerr = url.searchParams.get("pmailerr");
+    const suite = pmail === "pause" ? " L'email de confirmation est en pause (Emails automatiques)." : pmail ? ` Confirmation de paiement envoy\xE9e \xE0 <b>${echapper(pmail)}</b>.` : pmailerr ? ` <span class="err">L'email de confirmation n'a pas pu partir : ${echapper(pmailerr)}</span>` : "";
+    message = `<div class="reussite">Facture encaiss\xE9e. Commande <b>${echapper(paye)}</b> cr\xE9\xE9e dans Shopify.${suite}</div>`;
+  }
   if (url.searchParams.get("ebasc")) message = `<div class="reussite">\xC9tat de l'email modifi\xE9.</div>`;
   if (url.searchParams.get("emod")) message = `<div class="reussite">Mod\xE8le enregistr\xE9.</div>`;
   const reg = url.searchParams.get("reg");
