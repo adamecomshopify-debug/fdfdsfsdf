@@ -1662,7 +1662,7 @@ async function marquerPayee(env, numero) {
       f.client_societe ? `Soci\xE9t\xE9 : ${f.client_societe}` : null,
       "",
       f.description
-    ].filter((l) => l !== null).join("\n"),
+    ].filter((l) => l !== null).join("\n").replace(/^([\s\S]{4900})[\s\S]+$/, `$1\u2026\n(description compl\xE8te sur la facture n\xB0 ${f.numero})`),
     tags: ["facture", "prestation"],
     financialStatus: "PAID",
     sourceName: "Facture AdamEcom",
