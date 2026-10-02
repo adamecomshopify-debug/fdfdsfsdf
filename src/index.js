@@ -5693,7 +5693,7 @@ async function blogGeminiTexte(env, input, schema) {
     const reponse = await fetch("https://generativelanguage.googleapis.com/v1beta/interactions", {
       method: "POST",
       headers: { "content-type": "application/json", "x-goog-api-key": env.GEMINI_API_KEY },
-      body: JSON.stringify({ model: modele, input, tools: [{ type: "google_search" }], response_format: { type: "text", mime_type: "application/json", schema } }),
+      body: JSON.stringify({ model: modele, input, response_format: { type: "text", mime_type: "application/json", schema } }),
       signal: AbortSignal.timeout(24e4)
     }).catch((e) => ({ ok: false, status: 0, json: async () => ({ message: String(e?.message || e) }) }));
     const corps = await reponse.json().catch(() => null);
@@ -5730,7 +5730,7 @@ async function blogRedigerTexte(env, dossier) {
   };
   const input = `Tu es le r\xE9dacteur SEO d'AdamEcom (adam-ecom.com), expert Shopify, CRO (optimisation du taux de conversion) et e-commerce. Le blog s'adresse \xE0 des marchands Shopify francophones qui ont d\xE9j\xE0 du trafic et veulent vendre davantage.
 
-Choisis toi-m\xEAme un sujet utile et recherch\xE9 sur Google en fran\xE7ais (Shopify, conversion, fiche produit, panier, checkout, confiance, mobile, vitesse, SEO e-commerce, publicit\xE9 Meta/Google pour Shopify, fid\xE9lisation, emailing…). Utilise Google Search pour v\xE9rifier l'intention de recherche et les nouveaut\xE9s Shopify r\xE9centes.
+Choisis toi-m\xEAme un sujet utile et recherch\xE9 sur Google en fran\xE7ais (Shopify, conversion, fiche produit, panier, checkout, confiance, mobile, vitesse, SEO e-commerce, publicit\xE9 Meta/Google pour Shopify, fid\xE9lisation, emailing…). Appuie-toi sur ce que les marchands cherchent r\xE9ellement sur Google et sur les fonctionnalit\xE9s Shopify que tu connais avec certitude.
 
 Le sujet doit \xEAtre diff\xE9rent de ces articles d\xE9j\xE0 \xE9crits (ne reprends ni le m\xEAme sujet ni le m\xEAme angle) :
 ${titresDeja}
@@ -5740,7 +5740,7 @@ R\xE9dige un article complet en fran\xE7ais, de 1 800 \xE0 2 500 mots, concret, 
 R\xE8gles du HTML (champ html) :
 - structure : <article><header><h1>Titre</h1><p>introduction</p></header> puis plusieurs <section><h2>…</h2>…</section>, avec <h3>, <p>, <ul>/<ol>/<li>, <strong>, <table> si utile, et une section FAQ (<h2>Questions fr\xE9quentes</h2> avec des <h3>) puis une conclusion ; fermer </article> ;
 - aucun CSS : pas de balise <style>, pas d'attribut style, pas de class, pas de script, pas d'image ;
-- n'invente aucune statistique, aucun chiffre, aucune \xE9tude, aucun client ni aucune URL ; si tu cites un chiffre, il doit venir d'une source r\xE9elle trouv\xE9e avec Google et la source est nomm\xE9e dans le texte ;
+- n'invente aucune statistique, aucun chiffre, aucune \xE9tude, aucun client ni aucune URL ; n'avance un chiffre que s'il est public, connu et attribu\xE9 \xE0 sa source nomm\xE9e dans le texte, sinon n'en mets pas ; ne d\xE9cris pas de fonctionnalit\xE9 Shopify dont tu n'es pas s\xFBr ;
 - ne promets pas de r\xE9sultats garantis ;
 - n'ajoute pas d'appel \xE0 l'action commercial final : l'application ajoute elle-m\xEAme les blocs Shopify et prise d'appel.
 
