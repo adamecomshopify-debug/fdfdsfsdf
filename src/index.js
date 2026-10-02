@@ -387,7 +387,7 @@ async function newsletterSesEtape(env) {
     ligne.guid
   ).run();
   try {
-    if (!await emailAutorise(env, "blog_newsletter")) {
+    if (!ligne.ses_manuel && !await emailAutorise(env, "blog_newsletter")) {
       await finir("ses_envoi", "Mod\xE8le \xAB Newsletter d'un nouvel article \xBB en pause : envoi suspendu.", 30);
       return;
     }
@@ -441,6 +441,37 @@ async function newsletterSesEtape(env) {
   }
 }
 __name(newsletterSesEtape, "newsletterSesEtape");
+// Décision manuelle sur des articles en attente : envoyer (Amazon SES) ou retirer de la file.
+async function newsletterDecision(env, envoyer, guids) {
+  const db = env.DB;
+  await assurerNewsletterSchema(db);
+  if (!guids.length) return { n: 0 };
+  const maintenant = (/* @__PURE__ */ new Date()).toISOString();
+  const marques = guids.map(() => "?").join(",");
+  if (!envoyer) {
+    const r = await db.prepare(`UPDATE newsletter_envois SET statut='ignoree', verrou_jusqua=NULL, maj_le=? WHERE guid IN (${marques}) AND statut NOT IN ('envoyee','ses_envoi')`).bind(maintenant, ...guids).run();
+    for (const g of guids) await marquerTraite(db, DOMAINE2, g);
+    return { n: r.meta.changes };
+  }
+  if (!sesActif(env)) return { erreur: "L'envoi manuel passe par Amazon SES, qui n'est pas configur\xE9." };
+  const guid = guids[0];
+  const ligne = await db.prepare("SELECT * FROM newsletter_envois WHERE guid=?").bind(guid).first();
+  if (!ligne || ["envoyee", "ses_envoi"].includes(ligne.statut)) return { erreur: "Cet article est d\xE9j\xE0 envoy\xE9 ou en cours d'envoi." };
+  let extrait = ligne.extrait, image = ligne.image, date = ligne.date_article;
+  if (!extrait && env.FEED_URL) {
+    try {
+      const res = await fetch(env.FEED_URL, { headers: { "user-agent": "AdamEcom-newsletter/3.0" }, signal: AbortSignal.timeout(15e3) });
+      const a = lireFlux(await res.text()).find((x) => x.guid === guid);
+      if (a) ({ extrait, image, date } = { extrait: a.extrait, image: a.image, date: a.date });
+    } catch {
+    }
+  }
+  const liste = await listeDestinataires(env);
+  await db.prepare(`UPDATE newsletter_envois SET statut='ses_envoi', campagne_id='ses', ses_manuel=1, ses_liste=?, ses_offset=0, ses_envoyes=0, ses_erreurs=0,
+    extrait=?, image=?, date_article=?, destinataires=?, erreur=NULL, verrou_jusqua=NULL, maj_le=? WHERE guid=?`).bind(liste.id, extrait || "", image || null, date || null, liste.contacts, maintenant, guid).run();
+  return { n: 1 };
+}
+__name(newsletterDecision, "newsletterDecision");
 var jetonEnCache = null;
 var oublierJetonShopify = /* @__PURE__ */ __name22(() => {
   jetonEnCache = null;
@@ -937,7 +968,7 @@ async function assurerNewsletterSchema(db) {
     verrou_jusqua TEXT
   )`).run();
   await db.prepare("CREATE INDEX IF NOT EXISTS idx_newsletter_envois_statut ON newsletter_envois(statut, maj_le)").run();
-  for (const col of ["ses_liste INTEGER", "ses_offset INTEGER", "ses_envoyes INTEGER", "ses_erreurs INTEGER", "extrait TEXT", "image TEXT", "date_article TEXT"]) {
+  for (const col of ["ses_liste INTEGER", "ses_offset INTEGER", "ses_envoyes INTEGER", "ses_erreurs INTEGER", "extrait TEXT", "image TEXT", "date_article TEXT", "ses_manuel INTEGER"]) {
     await db.prepare(`ALTER TABLE newsletter_envois ADD COLUMN ${col}`).run().catch(() => {
     });
   }
@@ -1132,6 +1163,18 @@ async function executer2(env) {
   }
   nouveaux.reverse();
   log(`${nouveaux.length} nouvel(s) article(s)`);
+  if (!await emailAutorise(env, "blog_newsletter")) {
+    // Envoi automatique en pause : les articles attendent dans « Articles en attente »,
+    // où vous choisissez de les envoyer ou non.
+    const maintenant = (/* @__PURE__ */ new Date()).toISOString();
+    for (const a of nouveaux) {
+      await db.prepare(`INSERT OR IGNORE INTO newsletter_envois (guid,titre,lien,statut,essais,cree_le,maj_le,extrait,image,date_article)
+        VALUES (?,?,?,'preparation',0,?,?,?,?,?)`).bind(a.guid, a.titre, a.lien || null, maintenant, maintenant, a.extrait || "", a.image || null, a.date || null).run();
+      await db.prepare("UPDATE newsletter_envois SET extrait=COALESCE(extrait, ?), image=COALESCE(image, ?), date_article=COALESCE(date_article, ?) WHERE guid=?").bind(a.extrait || "", a.image || null, a.date || null, a.guid).run();
+    }
+    log("Envoi automatique en pause : articles en attente de votre d\xE9cision.");
+    return;
+  }
   let liste;
   try {
     liste = await listeDestinataires(env);
@@ -1152,6 +1195,13 @@ async function executer2(env) {
       maintenant,
       maintenant
     ).run();
+    // Pas parti le jour où il a été détecté : il passe dans « À envoyer », envoi manuel uniquement.
+    await db.prepare(`UPDATE newsletter_envois SET statut='a_envoyer', verrou_jusqua=NULL
+      WHERE guid=? AND statut NOT IN ('envoyee','ses_envoi','ignoree','a_envoyer') AND substr(cree_le,1,10) < ?`).bind(a.guid, maintenant.slice(0, 10)).run();
+    if ((await db.prepare("SELECT statut FROM newsletter_envois WHERE guid=?").bind(a.guid).first())?.statut === "a_envoyer") {
+      log(`\xC0 envoyer manuellement (pas parti le jour m\xEAme) : ${a.titre}`);
+      continue;
+    }
     const verrou = new Date(Date.now() + 10 * 60 * 1e3).toISOString();
     const prise = await db.prepare(`UPDATE newsletter_envois
       SET verrou_jusqua=?, essais=essais+1, maj_le=?
@@ -6849,6 +6899,8 @@ async function pageNewsletter(env, url, message) {
   ]);
   const ok = exec?.statut === "ok";
   const muet = exec && Date.now() - new Date(exec.quand).getTime() > 9e5 * 3;
+  const enAttente = await tous2(env.DB, "SELECT guid,titre,lien,statut,cree_le,erreur FROM newsletter_envois WHERE statut NOT IN ('envoyee','ignoree','ses_envoi') ORDER BY cree_le").catch(() => []);
+  const autoActif = await emailAutorise(env, "blog_newsletter");
   const envoisSes = sesActif(env) ? await tous2(env.DB, "SELECT titre,lien,statut,destinataires,ses_envoyes,ses_erreurs,erreur,maj_le,envoyee_le FROM newsletter_envois WHERE campagne_id='ses' ORDER BY maj_le DESC LIMIT 10").catch(() => []) : [];
   const suivies = camps.map((c) => stats.get(String(c.id))).filter(Boolean);
   const livres = suivies.reduce((t, s) => t + s.livres, 0);
@@ -6904,6 +6956,22 @@ async function pageNewsletter(env, url, message) {
     blog. D\xE8s qu'un article y appara\xEEt, ${sesActif(env) ? `il part par Amazon SES vers chaque contact de votre liste Brevo (${SES_PAR_MINUTE} par minute), avec un lien de d\xE9sinscription.` : "il part en campagne Brevo vers votre liste."}<br>
     <span class="sec">Flux : <a href="${echapper(env.FEED_URL || "")}" target="_blank" rel="noopener">${echapper(env.FEED_URL || "non configur\xE9")}</a>
     \xB7 liste ${echapper(env.BREVO_LIST || "\u2014")} \xB7 exp\xE9diteur ${echapper(env.SENDER_EMAIL || "\u2014")}</span></div>
+
+  ${enAttente.length ? `<section><h2>\xC0 envoyer</h2>
+    <div class="note">${autoActif ? "Ces articles ne sont pas partis le jour o\xF9 ils ont \xE9t\xE9 publi\xE9s : ils ne partiront plus tout seuls." : "L'envoi automatique est en pause : rien ne part sans votre accord."}
+      Choisissez pour chacun : <b>Envoyer maintenant</b> l'envoie \xE0 toute votre liste${sesActif(env) ? " par Amazon SES" : ""}, <b>Ne pas envoyer</b> le retire de la file.</div>
+    ${tableauHtml(
+    [{ nom: "Article" }, { nom: "D\xE9tect\xE9", classe: "nowrap" }, { nom: "" }],
+    enAttente.map((e) => `<tr><td><b>${echapper(e.titre || "\u2014")}</b>${e.lien ? `<br><a class="sec" href="${echapper(e.lien)}" target="_blank" rel="noopener">voir l'article \u2192</a>` : ""}</td>
+      <td class="nowrap">${dateFr2(e.cree_le)}</td>
+      <td class="nowrap"><form method="POST" action="?cle=${cle}&page=newsletter&action=nl_envoyer" style="display:inline" onsubmit="return confirm('Envoyer cet article \xE0 toute votre liste ?')">
+        <input type="hidden" name="guid" value="${echapper(e.guid)}"><button type="submit" class="bouton">Envoyer maintenant</button></form>
+        <form method="POST" action="?cle=${cle}&page=newsletter&action=nl_ignorer" style="display:inline">
+        <input type="hidden" name="guid" value="${echapper(e.guid)}"><button type="submit" class="bouton pale">Ne pas envoyer</button></form></td></tr>`),
+    "",
+    "tab-attente"
+  )}${enAttente.length > 1 ? `<form method="POST" action="?cle=${cle}&page=newsletter&action=nl_ignorer" style="margin-top:8px" onsubmit="return confirm('Retirer les ${enAttente.length} articles de la file ?')">
+    ${enAttente.map((e) => `<input type="hidden" name="guid" value="${echapper(e.guid)}">`).join("")}<button type="submit" class="bouton pale">Ne rien envoyer de cette liste</button></form>` : ""}</section>` : ""}
 
   ${envoisSes.length ? `<section><h2>Envois Amazon SES</h2>${tableauHtml(
     [{ nom: "Article" }, { nom: "Envoy\xE9s", classe: "num" }, { nom: "Erreurs", classe: "num" }, { nom: "\xC9tat" }, { nom: "Mis \xE0 jour", classe: "nowrap" }],
@@ -11395,6 +11463,10 @@ async function application(env, url, request) {
     } else if (action === "purger_taches") {
       const r = await purgerTerminees(env);
       return Response.redirect(`${url.origin}/?cle=${cle}&page=taches&tpurge=${r.nb}`, 303);
+    } else if (action === "nl_ignorer" || action === "nl_envoyer") {
+      const r = await newsletterDecision(env, action === "nl_envoyer", form.getAll("guid").map(String).slice(0, 200));
+      const q = r.erreur ? `&err=${encodeURIComponent(r.erreur)}` : `&nl=${action === "nl_envoyer" ? "envoi" : "ignore"}&n=${r.n}`;
+      return Response.redirect(`${url.origin}/?cle=${cle}&page=newsletter${q}`, 303);
     } else if (action === "export_contacts") {
       const camp = url.searchParams.get("campagne");
       const type = url.searchParams.get("type");
@@ -11531,6 +11603,7 @@ async function application(env, url, request) {
   if (url.searchParams.get("tsupp")) message = `<div class="reussite">T\xE2che supprim\xE9e.</div>`;
   const tp = url.searchParams.get("tpurge");
   if (tp) message = `<div class="reussite">${echapper(tp)} t\xE2che(s) termin\xE9e(s) supprim\xE9e(s).</div>`;
+  if (url.searchParams.get("nl")) message = url.searchParams.get("nl") === "envoi" ? `<div class="reussite">Envoi lanc\xE9 : ${SES_PAR_MINUTE} contacts par minute. Suivez-le dans \xAB Envois Amazon SES \xBB.</div>` : `<div class="reussite">${Number(url.searchParams.get("n")) || 0} article(s) retir\xE9(s) de la file. Ils ne partiront pas.</div>`;
   if (url.searchParams.get("exp")) message = `<div class="reussite">Liste r\xE9cup\xE9r\xE9e aupr\xE8s de Brevo.</div>`;
   if (url.searchParams.get("attente")) message = `<div class="note">Brevo pr\xE9pare encore le fichier.
     Patientez quelques secondes et cliquez de nouveau sur \xAB V\xE9rifier maintenant \xBB.</div>`;
