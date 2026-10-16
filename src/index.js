@@ -1304,12 +1304,29 @@ var banqueDe = /* @__PURE__ */ __name22((env) => {
     adresse: p.banque_adresse || env.BANQUE_ADRESSE || "4th Floor Imperial House, 15 Kingsway, London, United Kingdom, WC2B 6UN"
   };
 }, "banqueDe");
+var transfertDe = /* @__PURE__ */ __name22((env, mode = null) => {
+  const p = { transfert_actif: "1", transfert_prenom: "Mohamed", transfert_nom: "Chaoui", transfert_pays: "Maroc", transfert_services: "MoneyGram, Ria Money Transfer, Western Union, Remitly, TapTap Send", ...env._profil || {} };
+  if (mode === "virement" || !mode && String(p.transfert_actif) !== "1") return null;
+  const services = String(p.transfert_services || "").split(/[,;\n]+/).map((x) => x.trim()).filter(Boolean);
+  if (!services.length) return null;
+  return { services, prenom: p.transfert_prenom || "", nom: p.transfert_nom || "", pays: p.transfert_pays || "" };
+}, "transfertDe");
+var MODES_PAIEMENT = { les_deux: "Virement ou transfert d'argent", virement: "Virement bancaire uniquement", transfert: "Transfert d'argent uniquement" };
+var modePaiement = /* @__PURE__ */ __name22((f) => MODES_PAIEMENT[f?.paiement] ? f.paiement : null, "modePaiement");
+var mentionPaiement = /* @__PURE__ */ __name22((b, t) => b && t ? "Paiement par virement bancaire ou par transfert d'argent." : t ? "Paiement par transfert d'argent." : "Paiement par virement bancaire.", "mentionPaiement");
+var champModePaiement = /* @__PURE__ */ __name22((actuel) => `<label>Moyen de paiement<select name="paiement">${Object.entries(MODES_PAIEMENT).map(([v, l]) => `<option value="${v}"${v === (actuel || "les_deux") ? " selected" : ""}>${l}</option>`).join("")}</select></label>`, "champModePaiement");
+async function assurerFacturePaiement(db) {
+  const colonnes = new Set((await tous2(db, "PRAGMA table_info(factures)")).map((c) => c.name));
+  if (!colonnes.has("paiement")) await db.prepare("ALTER TABLE factures ADD COLUMN paiement TEXT").run();
+}
 var JAUNE = "#FFDC3F";
 var NOIR = "#1B1B1B";
 var GRIS = "#6E6A5F";
 var TRAIT = "#E6E1D5";
 function gabaritFacture(f, env) {
-  const b = banqueDe(env);
+  const mode = modePaiement(f);
+  const b = mode === "transfert" ? null : banqueDe(env);
+  const t = transfertDe(env, mode);
   const eq = /* @__PURE__ */ __name22((c) => `position:absolute;width:46px;height:46px;border:6px solid ${JAUNE};${c}`, "eq");
   return `<!doctype html><html lang="fr"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -1431,7 +1448,7 @@ function gabaritFacture(f, env) {
 
   <p class="regler">Montant total \xE0 r\xE9gler : ${euros(f.montant)}</p>
 
-  <div class="banque">
+  ${b ? `<div class="banque">
     <h3>COORDONN\xC9ES BANCAIRES</h3>
     <dl>
       <dt>Titulaire</dt><dd class="fort">${echapper(b.titulaire)}</dd>
@@ -1442,12 +1459,21 @@ function gabaritFacture(f, env) {
       <dt>Sort code</dt><dd>${echapper(b.guichet)}</dd>
       <dt>Adresse</dt><dd>${echapper(b.adresse)}</dd>
     </dl>
-  </div>
+  </div>` : ""}
+  ${t ? `<div class="banque"${b ? ' style="margin-top:14px"' : ""}>
+    <h3>${b ? "OU PAR TRANSFERT D'ARGENT" : "PAIEMENT PAR TRANSFERT D'ARGENT"}</h3>
+    <p style="margin:0 0 12px;font-size:14px">${b ? "J'accepte aussi" : "Services accept\xE9s"} : <b>${t.services.map(echapper).join(" \xB7 ")}</b></p>
+    <dl>
+      <dt>Pr\xE9nom</dt><dd class="fort">${echapper(t.prenom)}</dd>
+      <dt>Nom</dt><dd class="fort">${echapper(t.nom)}</dd>
+      <dt>Pays</dt><dd>${echapper(t.pays)}</dd>
+    </dl>
+  </div>` : ""}
 
   <div class="pied">Adam Ecom vous remercie pour votre confiance.</div>
   <div class="mentions">
     Facture n\xB0 ${f.numero} \xB7 AdamEcom \xB7 adam-ecom.com<br>
-    TVA non applicable \u2014 article 293 B du CGI. Paiement par virement bancaire.
+    TVA non applicable \u2014 article 293 B du CGI. ${mentionPaiement(b, t)}
   </div>
 </div></body></html>`;
 }
@@ -1455,7 +1481,9 @@ __name(gabaritFacture, "gabaritFacture");
 __name2(gabaritFacture, "gabaritFacture");
 __name22(gabaritFacture, "gabaritFacture");
 function factureEmail(f, env, lien) {
-  const b = banqueDe(env);
+  const mode = modePaiement(f);
+  const b = mode === "transfert" ? null : banqueDe(env);
+  const t = transfertDe(env, mode);
   const cell = `font-family:Helvetica,Arial,sans-serif;font-size:14px;line-height:1.6;color:${NOIR}`;
   const eti = `${cell};color:${GRIS};padding:3px 16px 3px 0;white-space:nowrap;vertical-align:top`;
   const val = `${cell};padding:3px 0;font-weight:600;word-break:break-word`;
@@ -1506,7 +1534,7 @@ function factureEmail(f, env, lien) {
       <a href="${lien}" style="${cell};display:inline-block;background:${NOIR};color:#fff;font-weight:700;
         padding:14px 28px;border-radius:7px;text-decoration:none">Voir et t\xE9l\xE9charger la facture \u2192</a></td></tr>` : ""}
 
-    <tr><td style="padding:24px 28px 0">
+    ${b ? `<tr><td style="padding:24px 28px 0">
       <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"
         style="border:1px solid ${TRAIT};border-radius:9px">
         <tr><td style="padding:16px 18px">
@@ -1520,12 +1548,24 @@ function factureEmail(f, env, lien) {
             <tr><td style="${eti}">N\xB0 de compte</td><td style="${val}">${echapper(b.compte)}</td></tr>
             <tr><td style="${eti}">Sort code</td><td style="${val}">${echapper(b.guichet)}</td></tr>
             <tr><td style="${eti}">Adresse</td><td style="${val}">${echapper(b.adresse)}</td></tr>
-          </table></td></tr></table></td></tr>
+          </table></td></tr></table></td></tr>` : ""}
+    ${t ? `<tr><td style="padding:${b ? 14 : 24}px 28px 0">
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"
+        style="border:1px solid ${TRAIT};border-radius:9px">
+        <tr><td style="padding:16px 18px">
+          <div style="${cell};color:${GRIS};font-weight:800;font-size:11.5px;letter-spacing:.12em;
+            margin-bottom:10px">${b ? "OU PAR TRANSFERT D'ARGENT" : "PAIEMENT PAR TRANSFERT D'ARGENT"}</div>
+          <div style="${cell};margin-bottom:8px">${b ? "J'accepte aussi" : "Services accept\xE9s"} : <b>${t.services.map(echapper).join(" \xB7 ")}</b></div>
+          <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
+            <tr><td style="${eti}">Pr\xE9nom</td><td style="${val}">${echapper(t.prenom)}</td></tr>
+            <tr><td style="${eti}">Nom</td><td style="${val}">${echapper(t.nom)}</td></tr>
+            <tr><td style="${eti}">Pays</td><td style="${val}">${echapper(t.pays)}</td></tr>
+          </table></td></tr></table></td></tr>` : ""}
 
     <tr><td align="center" style="padding:26px 28px 30px">
       <div style="${cell};font-weight:800">Adam Ecom vous remercie pour votre confiance.</div>
       <div style="${cell};font-size:11.5px;color:${GRIS};margin-top:8px">
-        TVA non applicable \u2014 article 293 B du CGI. Paiement par virement bancaire.</div></td></tr>
+        TVA non applicable \u2014 article 293 B du CGI. ${mentionPaiement(b, t)}</div></td></tr>
 
   </table></td></tr></table>`;
 }
@@ -1574,11 +1614,12 @@ async function creerFacture(env, form) {
   if (!description) erreurs.push("la description");
   if (!Number.isFinite(montant) || montant <= 0) erreurs.push("un montant sup\xE9rieur \xE0 z\xE9ro");
   if (erreurs.length) return { erreur: `Il manque ${erreurs.join(", ")}.` };
+  await assurerFacturePaiement(env.DB);
   const maintenant = (/* @__PURE__ */ new Date()).toISOString();
   const r = await env.DB.prepare(
     `INSERT INTO factures (date_facture, client_nom, client_societe, client_email,
-                           prestation, description, montant, statut, jeton, cree_le)
-     VALUES (?, ?, ?, ?, ?, ?, ?, 'brouillon', ?, ?)`
+                           prestation, description, montant, statut, jeton, cree_le, paiement)
+     VALUES (?, ?, ?, ?, ?, ?, ?, 'brouillon', ?, ?, ?)`
   ).bind(
     form.get("date_facture") || maintenant.slice(0, 10),
     nom,
@@ -1588,7 +1629,8 @@ async function creerFacture(env, form) {
     description,
     montant,
     nouveauJeton(),
-    maintenant
+    maintenant,
+    modePaiement({ paiement: form.get("paiement") }) || "les_deux"
   ).run();
   return { numero: r.meta.last_row_id };
 }
@@ -1755,9 +1797,10 @@ async function modifierFacture(env, numero, form) {
   if (!description) erreurs.push("la description");
   if (!Number.isFinite(montant) || montant <= 0) erreurs.push("un montant sup\xE9rieur \xE0 z\xE9ro");
   if (erreurs.length) return { erreur: `Il manque ${erreurs.join(", ")}.` };
+  await assurerFacturePaiement(env.DB);
   await env.DB.prepare(
     `UPDATE factures SET date_facture=?, client_nom=?, client_societe=?, client_email=?,
-                         prestation=?, description=?, montant=? WHERE numero=?`
+                         prestation=?, description=?, montant=?, paiement=? WHERE numero=?`
   ).bind(
     form.get("date_facture") || f.date_facture,
     nom,
@@ -1766,6 +1809,7 @@ async function modifierFacture(env, numero, form) {
     prestation,
     description,
     montant,
+    modePaiement({ paiement: form.get("paiement") }) || "les_deux",
     numero
   ).run();
   return { ok: true };
@@ -7517,7 +7561,7 @@ async function pageFacture(env, url, message) {
           <label class="large">Prestation<input name="prestation" required value="${echapper(f.prestation)}"></label>
           <label class="large">Description<textarea name="description" required>${echapper(f.description)}</textarea></label>
           <label>Montant TTC<input name="montant" required value="${f.montant}"></label>
-          <div></div>
+          ${champModePaiement(modePaiement(f))}
           <button class="envoyer large" type="submit">Enregistrer les modifications</button>
         </form>
         <div class="actions"><a class="bouton" href="?cle=${cle}&page=facture&numero=${f.numero}">Annuler la modification</a></div>`;
@@ -7602,7 +7646,7 @@ Une vraie commande de ${euros3(f.montant)} sera cr\xE9\xE9e dans Shopify et comp
       <label class="large">Description d\xE9taill\xE9e
         <textarea name="description" required placeholder="Accompagnement complet \u2026&#10;&#10;L'objectif de cet accompagnement est \u2026"></textarea></label>
       <label>Montant TTC en euros<input name="montant" required inputmode="decimal" placeholder="400"></label>
-      <div></div>
+      ${champModePaiement("les_deux")}
       <button class="envoyer large" type="submit">G\xE9n\xE9rer la facture</button>
     </form>
     <script>
@@ -11024,13 +11068,18 @@ var PROFIL_DEFAUTS = /* @__PURE__ */ __name2((env) => ({
   banque_bic: env.BANQUE_BIC || "",
   banque_compte: env.BANQUE_COMPTE || "",
   banque_guichet: env.BANQUE_GUICHET || "",
-  banque_adresse: env.BANQUE_ADRESSE || ""
+  banque_adresse: env.BANQUE_ADRESSE || "",
+  transfert_actif: "1",
+  transfert_prenom: "Mohamed",
+  transfert_nom: "Chaoui",
+  transfert_pays: "Maroc",
+  transfert_services: "MoneyGram, Ria Money Transfer, Western Union, Remitly, TapTap Send"
 }), "PROFIL_DEFAUTS");
 async function chargerProfil(env) {
   if (env._profil) return env._profil;
   const p = { ...PROFIL_DEFAUTS(env) };
   try {
-    const { results = [] } = await env.DB.prepare("SELECT cle, valeur FROM reglages WHERE cle LIKE 'profil_%' OR cle LIKE 'banque_%'").all();
+    const { results = [] } = await env.DB.prepare("SELECT cle, valeur FROM reglages WHERE cle LIKE 'profil_%' OR cle LIKE 'banque_%' OR cle LIKE 'transfert_%'").all();
     for (const r of results) if (r.valeur !== null && r.valeur !== "") p[r.cle] = r.valeur;
   } catch {
   }
@@ -11094,6 +11143,21 @@ async function pageReglages(env, url, message) {
       ${champ("banque_guichet", "Code guichet", p.banque_guichet)}
       ${champ("banque_adresse", "Adresse de la banque", p.banque_adresse, "textarea")}
       <button class="envoyer large" type="submit">Enregistrer les coordonn\xE9es</button>
+    </form>
+  </section>
+
+  <section><h2>Transferts d'argent</h2>
+    <p class="sec" style="margin:-4px 0 0">Affich\xE9s sur chaque facture sous les coordonn\xE9es bancaires, comme autre moyen de paiement.</p>
+    <form class="f" method="POST" action="?cle=${cle}&page=reglages&action=reglages_transfert">
+      <input type="hidden" name="transfert_actif" value="0">
+      <label class="large" style="display:flex;align-items:center;gap:10px;text-transform:none;letter-spacing:0">
+        <input type="checkbox" name="transfert_actif" value="1"${String(p.transfert_actif) === "1" ? " checked" : ""} style="width:auto">
+        Accepter les transferts d'argent sur mes factures</label>
+      ${champ("transfert_services", "Services accept\xE9s", p.transfert_services, "text", "s\xE9par\xE9s par des virgules")}
+      ${champ("transfert_prenom", "Pr\xE9nom du b\xE9n\xE9ficiaire", p.transfert_prenom)}
+      ${champ("transfert_nom", "Nom du b\xE9n\xE9ficiaire", p.transfert_nom)}
+      ${champ("transfert_pays", "Pays", p.transfert_pays)}
+      <button class="envoyer large" type="submit">Enregistrer les transferts</button>
     </form>
   </section>
 
@@ -11694,7 +11758,8 @@ async function application(env, url, request) {
           "profil_mentions"
         ],
         reglages_logo: ["profil_logo"],
-        reglages_banque: ["banque_"]
+        reglages_banque: ["banque_"],
+        reglages_transfert: ["transfert_"]
       };
       const prefixes = lots[action];
       if (!prefixes) return retour("");
