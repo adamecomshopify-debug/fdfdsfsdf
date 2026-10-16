@@ -1304,12 +1304,20 @@ var banqueDe = /* @__PURE__ */ __name22((env) => {
     adresse: p.banque_adresse || env.BANQUE_ADRESSE || "4th Floor Imperial House, 15 Kingsway, London, United Kingdom, WC2B 6UN"
   };
 }, "banqueDe");
+var transfertDe = /* @__PURE__ */ __name22((env) => {
+  const p = { transfert_actif: "1", transfert_prenom: "Mohamed", transfert_nom: "Chaoui", transfert_pays: "Maroc", transfert_services: "MoneyGram, Ria Money Transfer, Western Union, Remitly, TapTap Send", ...env._profil || {} };
+  if (String(p.transfert_actif) !== "1") return null;
+  const services = String(p.transfert_services || "").split(/[,;\n]+/).map((x) => x.trim()).filter(Boolean);
+  if (!services.length) return null;
+  return { services, prenom: p.transfert_prenom || "", nom: p.transfert_nom || "", pays: p.transfert_pays || "" };
+}, "transfertDe");
 var JAUNE = "#FFDC3F";
 var NOIR = "#1B1B1B";
 var GRIS = "#6E6A5F";
 var TRAIT = "#E6E1D5";
 function gabaritFacture(f, env) {
   const b = banqueDe(env);
+  const t = transfertDe(env);
   const eq = /* @__PURE__ */ __name22((c) => `position:absolute;width:46px;height:46px;border:6px solid ${JAUNE};${c}`, "eq");
   return `<!doctype html><html lang="fr"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -1443,11 +1451,20 @@ function gabaritFacture(f, env) {
       <dt>Adresse</dt><dd>${echapper(b.adresse)}</dd>
     </dl>
   </div>
+  ${t ? `<div class="banque" style="margin-top:14px">
+    <h3>OU PAR TRANSFERT D'ARGENT</h3>
+    <p style="margin:0 0 12px;font-size:14px">J'accepte aussi : <b>${t.services.map(echapper).join(" \xB7 ")}</b></p>
+    <dl>
+      <dt>Pr\xE9nom</dt><dd class="fort">${echapper(t.prenom)}</dd>
+      <dt>Nom</dt><dd class="fort">${echapper(t.nom)}</dd>
+      <dt>Pays</dt><dd>${echapper(t.pays)}</dd>
+    </dl>
+  </div>` : ""}
 
   <div class="pied">Adam Ecom vous remercie pour votre confiance.</div>
   <div class="mentions">
     Facture n\xB0 ${f.numero} \xB7 AdamEcom \xB7 adam-ecom.com<br>
-    TVA non applicable \u2014 article 293 B du CGI. Paiement par virement bancaire.
+    TVA non applicable \u2014 article 293 B du CGI. Paiement par virement bancaire${t ? " ou par transfert d'argent" : ""}.
   </div>
 </div></body></html>`;
 }
@@ -1456,6 +1473,7 @@ __name2(gabaritFacture, "gabaritFacture");
 __name22(gabaritFacture, "gabaritFacture");
 function factureEmail(f, env, lien) {
   const b = banqueDe(env);
+  const t = transfertDe(env);
   const cell = `font-family:Helvetica,Arial,sans-serif;font-size:14px;line-height:1.6;color:${NOIR}`;
   const eti = `${cell};color:${GRIS};padding:3px 16px 3px 0;white-space:nowrap;vertical-align:top`;
   const val = `${cell};padding:3px 0;font-weight:600;word-break:break-word`;
@@ -1521,11 +1539,23 @@ function factureEmail(f, env, lien) {
             <tr><td style="${eti}">Sort code</td><td style="${val}">${echapper(b.guichet)}</td></tr>
             <tr><td style="${eti}">Adresse</td><td style="${val}">${echapper(b.adresse)}</td></tr>
           </table></td></tr></table></td></tr>
+    ${t ? `<tr><td style="padding:14px 28px 0">
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"
+        style="border:1px solid ${TRAIT};border-radius:9px">
+        <tr><td style="padding:16px 18px">
+          <div style="${cell};color:${GRIS};font-weight:800;font-size:11.5px;letter-spacing:.12em;
+            margin-bottom:10px">OU PAR TRANSFERT D'ARGENT</div>
+          <div style="${cell};margin-bottom:8px">J'accepte aussi : <b>${t.services.map(echapper).join(" \xB7 ")}</b></div>
+          <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
+            <tr><td style="${eti}">Pr\xE9nom</td><td style="${val}">${echapper(t.prenom)}</td></tr>
+            <tr><td style="${eti}">Nom</td><td style="${val}">${echapper(t.nom)}</td></tr>
+            <tr><td style="${eti}">Pays</td><td style="${val}">${echapper(t.pays)}</td></tr>
+          </table></td></tr></table></td></tr>` : ""}
 
     <tr><td align="center" style="padding:26px 28px 30px">
       <div style="${cell};font-weight:800">Adam Ecom vous remercie pour votre confiance.</div>
       <div style="${cell};font-size:11.5px;color:${GRIS};margin-top:8px">
-        TVA non applicable \u2014 article 293 B du CGI. Paiement par virement bancaire.</div></td></tr>
+        TVA non applicable \u2014 article 293 B du CGI. Paiement par virement bancaire${t ? " ou par transfert d'argent" : ""}.</div></td></tr>
 
   </table></td></tr></table>`;
 }
@@ -11024,13 +11054,18 @@ var PROFIL_DEFAUTS = /* @__PURE__ */ __name2((env) => ({
   banque_bic: env.BANQUE_BIC || "",
   banque_compte: env.BANQUE_COMPTE || "",
   banque_guichet: env.BANQUE_GUICHET || "",
-  banque_adresse: env.BANQUE_ADRESSE || ""
+  banque_adresse: env.BANQUE_ADRESSE || "",
+  transfert_actif: "1",
+  transfert_prenom: "Mohamed",
+  transfert_nom: "Chaoui",
+  transfert_pays: "Maroc",
+  transfert_services: "MoneyGram, Ria Money Transfer, Western Union, Remitly, TapTap Send"
 }), "PROFIL_DEFAUTS");
 async function chargerProfil(env) {
   if (env._profil) return env._profil;
   const p = { ...PROFIL_DEFAUTS(env) };
   try {
-    const { results = [] } = await env.DB.prepare("SELECT cle, valeur FROM reglages WHERE cle LIKE 'profil_%' OR cle LIKE 'banque_%'").all();
+    const { results = [] } = await env.DB.prepare("SELECT cle, valeur FROM reglages WHERE cle LIKE 'profil_%' OR cle LIKE 'banque_%' OR cle LIKE 'transfert_%'").all();
     for (const r of results) if (r.valeur !== null && r.valeur !== "") p[r.cle] = r.valeur;
   } catch {
   }
@@ -11094,6 +11129,21 @@ async function pageReglages(env, url, message) {
       ${champ("banque_guichet", "Code guichet", p.banque_guichet)}
       ${champ("banque_adresse", "Adresse de la banque", p.banque_adresse, "textarea")}
       <button class="envoyer large" type="submit">Enregistrer les coordonn\xE9es</button>
+    </form>
+  </section>
+
+  <section><h2>Transferts d'argent</h2>
+    <p class="sec" style="margin:-4px 0 0">Affich\xE9s sur chaque facture sous les coordonn\xE9es bancaires, comme autre moyen de paiement.</p>
+    <form class="f" method="POST" action="?cle=${cle}&page=reglages&action=reglages_transfert">
+      <input type="hidden" name="transfert_actif" value="0">
+      <label class="large" style="display:flex;align-items:center;gap:10px;text-transform:none;letter-spacing:0">
+        <input type="checkbox" name="transfert_actif" value="1"${String(p.transfert_actif) === "1" ? " checked" : ""} style="width:auto">
+        Accepter les transferts d'argent sur mes factures</label>
+      ${champ("transfert_services", "Services accept\xE9s", p.transfert_services, "text", "s\xE9par\xE9s par des virgules")}
+      ${champ("transfert_prenom", "Pr\xE9nom du b\xE9n\xE9ficiaire", p.transfert_prenom)}
+      ${champ("transfert_nom", "Nom du b\xE9n\xE9ficiaire", p.transfert_nom)}
+      ${champ("transfert_pays", "Pays", p.transfert_pays)}
+      <button class="envoyer large" type="submit">Enregistrer les transferts</button>
     </form>
   </section>
 
@@ -11694,7 +11744,8 @@ async function application(env, url, request) {
           "profil_mentions"
         ],
         reglages_logo: ["profil_logo"],
-        reglages_banque: ["banque_"]
+        reglages_banque: ["banque_"],
+        reglages_transfert: ["transfert_"]
       };
       const prefixes = lots[action];
       if (!prefixes) return retour("");
