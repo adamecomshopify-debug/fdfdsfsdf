@@ -1576,13 +1576,41 @@ var listeFactures = /* @__PURE__ */ __name22(async (db, limite = 50) => {
   try {
     const { results = [] } = await db.prepare(`SELECT numero, date_facture, client_nom, client_societe, client_email,
                        prestation, montant, statut, envoyee_le, jeton,
-                       payee_le, commande_shopify, commande_shopify_id, annulee_le
+                       payee_le, commande_shopify, commande_shopify_id, annulee_le,
+                       vue_le, vue_derniere, vues, email_ouvert_le
                 FROM factures ORDER BY numero DESC LIMIT ?`).bind(limite).all();
     return results;
   } catch {
     return [];
   }
 }, "listeFactures");
+async function assurerFactureSuivi(db) {
+  const colonnes = new Set((await tous2(db, "PRAGMA table_info(factures)")).map((c) => c.name));
+  for (const [nom, type] of [["vue_le", "TEXT"], ["vue_derniere", "TEXT"], ["vues", "INTEGER NOT NULL DEFAULT 0"], ["email_ouvert_le", "TEXT"]]) {
+    if (!colonnes.has(nom)) await db.prepare(`ALTER TABLE factures ADD COLUMN ${nom} ${type}`).run();
+  }
+}
+var FACTURE_ROBOTS = /bot|crawl|spider|preview|scanner|safelinks|proofpoint|mimecast|barracuda|headless|curl|wget|python|go-http|facebookexternalhit|whatsapp|slack|telegram|discord|skype/i;
+async function factureNoterVue(env, request, f, type) {
+  if (await authSession(request, env).catch(() => null)) return;
+  if (FACTURE_ROBOTS.test(request.headers.get("user-agent") || "")) return;
+  if (f.envoyee_le && Date.now() - Date.parse(f.envoyee_le) < 2e4) return;
+  const maintenant = (/* @__PURE__ */ new Date()).toISOString();
+  const ecrire = () => type === "email" ? env.DB.prepare("UPDATE factures SET email_ouvert_le=COALESCE(email_ouvert_le, ?) WHERE numero=?").bind(maintenant, f.numero).run() : env.DB.prepare("UPDATE factures SET vues=COALESCE(vues,0)+1, vue_le=COALESCE(vue_le, ?), vue_derniere=? WHERE numero=?").bind(maintenant, maintenant, f.numero).run();
+  try {
+    await ecrire();
+  } catch (e) {
+    if (!/no such column/i.test(String(e?.message || e))) return;
+    await assurerFactureSuivi(env.DB);
+    await ecrire().catch(() => null);
+  }
+}
+var suiviFacture = /* @__PURE__ */ __name22((f) => {
+  if (Number(f.vues) > 0) return { ton: "bon", lib: "ouverte", detail: `${Number(f.vues) > 1 ? `${f.vues} fois, ` : ""}derni\xE8re fois le ${dateFr2(f.vue_derniere || f.vue_le)}` };
+  if (f.email_ouvert_le) return { ton: "moyen", lib: "email lu", detail: `email ouvert le ${dateFr2(f.email_ouvert_le)}, facture pas encore ouverte` };
+  if (f.envoyee_le) return { ton: "neutre", lib: "pas encore ouverte", detail: "ni l'email ni la facture n'ont \xE9t\xE9 ouverts" };
+  return null;
+}, "suiviFacture");
 var lireFacture = /* @__PURE__ */ __name22((db, numero) => db.prepare("SELECT * FROM factures WHERE numero = ?").bind(numero).first(), "lireFacture");
 var lireFactureParJeton = /* @__PURE__ */ __name22((db, jeton) => db.prepare("SELECT * FROM factures WHERE jeton = ?").bind(jeton).first(), "lireFactureParJeton");
 async function clientsShopify(env) {
@@ -1653,7 +1681,7 @@ async function envoyerFacture(env, numero, origine) {
   const corps = `<!doctype html><html lang="fr"><head><meta charset="utf-8">
     <meta name="viewport" content="width=device-width,initial-scale=1"></head>
     <body style="margin:0;padding:0;background:#EFEDE7">
-    ${intro}${factureEmail(f, env, lien)}${fin}</body></html>`;
+    ${intro}${factureEmail(f, env, lien)}${fin}<img src="${lien}/o.gif" width="1" height="1" alt="" style="display:block;border:0;width:1px;height:1px"></body></html>`;
   if (!await emailAutorise(env, "facture_envoi")) {
     await noterEnvoi(env, "facture_envoi", f.client_email, null, "bloqu\xE9", "mod\xE8le en pause");
     return { erreur: "L'envoi des factures est en pause. R\xE9activez-le dans Emails automatiques." };
@@ -7166,7 +7194,7 @@ async function pageFacturation(env) {
   const cle = encodeURIComponent(env.CLE_TEST);
   const boutique = env.SHOPIFY_STORE.split(".")[0];
   const [factures, { donnees, erreur }] = await Promise.all([
-    listeFactures(env.DB, 100),
+    assurerFactureSuivi(env.DB).then(() => listeFactures(env.DB, 100)),
     depuisShopify(env, REQ_FACTURATION)
   ]);
   const somme = /* @__PURE__ */ __name22((liste) => liste.reduce((t, f) => t + Number(f.montant || 0), 0), "somme");
@@ -7180,7 +7208,10 @@ async function pageFacturation(env) {
       <td>${echapper(f.prestation)}</td>
       <td class="nowrap">${dateFr2(f.date_facture, false)}</td>
       <td class="num"><b>${euros3(f.montant)}</b></td>
-      <td>${pastille(f.statut)}</td>
+      <td>${pastille(f.statut)}${(() => {
+    const v = suiviFacture(f);
+    return v && f.statut !== "annul\xE9e" ? `<br><span class="sec" title="${echapper(v.detail)}">${v.ton === "bon" ? "\u{1F441} " : ""}${v.lib}</span>` : "";
+  })()}</td>
       <td class="nowrap">${f.commande_shopify_id ? `<a href="https://admin.shopify.com/store/${boutique}/orders/${echapper(f.commande_shopify_id)}" target="_blank" rel="noopener">${echapper(f.commande_shopify)}</a>` : "\u2014"}</td>
       <td class="nowrap"><a class="bouton pale" href="?cle=${cle}&page=facture&numero=${f.numero}">Ouvrir</a></td>
     </tr>`, "facture");
@@ -7574,6 +7605,10 @@ async function pageFacture(env, url, message) {
         <div class="carte ${f.statut === "pay\xE9e" ? "bon" : f.statut === "envoy\xE9e" ? "moyen" : "neutre"}">
           <div class="k">Statut</div><div class="v txt">${echapper(f.statut)}</div>
           <div class="s">${f.payee_le ? `encaiss\xE9e le ${dateFr2(f.payee_le)}` : f.envoyee_le ? `envoy\xE9e le ${dateFr2(f.envoyee_le)}` : "pas encore envoy\xE9e"}</div></div>
+        ${(() => {
+    const v = suiviFacture(f);
+    return v ? `<div class="carte ${v.ton}"><div class="k">Consultation par le client</div><div class="v txt">${v.lib}</div><div class="s">${echapper(v.detail)}</div></div>` : "";
+  })()}
         ${f.commande_shopify_id ? `<div class="carte bon"><div class="k">Commande Shopify</div>
           <div class="v txt"><a href="https://admin.shopify.com/store/${env.SHOPIFY_STORE.split(".")[0]}/orders/${echapper(f.commande_shopify_id)}" target="_blank" rel="noopener">${echapper(f.commande_shopify)}</a></div>
           <div class="s">pay\xE9e \xB7 compt\xE9e dans le chiffre d'affaires</div></div>` : ""}
@@ -12166,8 +12201,14 @@ var index_default = {
       if (r) return r;
     }
     if (url.pathname.startsWith("/f/")) {
-      const f = await lireFactureParJeton(env.DB, url.pathname.slice(3));
+      const pixel = url.pathname.match(/^\/f\/([^/]+)\/o\.gif$/);
+      const f = await lireFactureParJeton(env.DB, pixel ? pixel[1] : url.pathname.slice(3));
+      if (pixel) {
+        if (f) await factureNoterVue(env, request, f, "email");
+        return new Response(RADAR_PIXEL, { headers: { "content-type": "image/gif", "cache-control": "no-store, max-age=0" } });
+      }
       if (!f) return new Response("Facture introuvable", { status: 404 });
+      await factureNoterVue(env, request, f, "page");
       await chargerProfil(env);
       return new Response(gabaritFacture(f, env), {
         headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" }
